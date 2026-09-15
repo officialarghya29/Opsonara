@@ -16,6 +16,16 @@ from opsonara.core.models import (
 )
 
 
+@pytest.fixture
+def api_client():
+    """Hermetic TestClient for API tests that need one."""
+    from fastapi.testclient import TestClient
+
+    from opsonara.main import create_app
+
+    return TestClient(create_app(overrides={"seed_demo_data": False}))
+
+
 def make_action(
     type_: str = "refund",
     amount: str = "799",

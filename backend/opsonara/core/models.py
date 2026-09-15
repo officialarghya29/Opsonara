@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from opsonara.core.money import parse_money
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ class ProposedAction(BaseModel):
             # and silently quantizing could hide a mismatch between what the
             # agent computed and what we audit.
             raise ValueError("amount must be sent as a string or int, not a float")
-        return Decimal(str(v)).quantize(Decimal("0.01"))
+        return parse_money(v, "amount")
 
     @model_validator(mode="after")
     def _validate_amount_semantics(self) -> ProposedAction:
@@ -166,7 +168,7 @@ class CustomerProfile(BaseModel):
     def _quantize(cls, v: Any) -> Decimal:
         if isinstance(v, float):
             raise ValueError("monetary fields must be strings or ints, not floats")
-        return Decimal(str(v)).quantize(Decimal("0.01"))
+        return parse_money(v, "monetary field")
 
 
 class OrderContext(BaseModel):
@@ -188,7 +190,7 @@ class OrderContext(BaseModel):
     def _quantize(cls, v: Any) -> Decimal:
         if isinstance(v, float):
             raise ValueError("total must be a string or int, not a float")
-        return Decimal(str(v)).quantize(Decimal("0.01"))
+        return parse_money(v, "order total")
 
     @model_validator(mode="after")
     def _validate_status(self) -> OrderContext:
@@ -255,7 +257,7 @@ class BrandPolicy(BaseModel):
     def _quantize(cls, v: Any) -> Decimal:
         if isinstance(v, float):
             raise ValueError("policy limits must be strings or ints, not floats")
-        return Decimal(str(v)).quantize(Decimal("0.01"))
+        return parse_money(v, "policy limit")
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +358,14 @@ class AuditRecord(BaseModel):
         }
 
     def fingerprint(self) -> str:
-        """Stable SHA-256 over the decision content (chain-hash seed)."""
+        """Stable SHA-256 over the decision content (chain-hash seed).
+
+        ``human_decision`` is deliberately excluded: it is the one field
+        designed to be filled in later (when a human resolves a REVIEW).
+        The human's actual verdict is tamper-evidently recorded in its own
+        follow-up audit record, so the chain still proves what happened —
+        it just doesn't pin the mutable status pointer on the origin row.
+        """
         payload = (
             f"{self.timestamp.isoformat()}|{self.agent_id}|{self.action}|{self.amount}|"
             f"{self.decision.value}"

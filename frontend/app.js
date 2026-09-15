@@ -17,10 +17,22 @@ function esc(value) {
 async function api(path, options) {
   const res = await fetch(`${API_BASE}${path}`, options);
   if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.detail || `${res.status} ${res.statusText}`);
+    const body = await res.json().catch(() => ({}));
+    throw new Error(detailMessage(res.status, body.detail));
   }
   return res.json();
+}
+
+function detailMessage(status, detail) {
+  if (!detail) return `${status} request failed`;
+  if (typeof detail === "string") return detail;
+  // FastAPI validation errors arrive as an array of {loc, msg, type}.
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => `${(d.loc || []).slice(1).join(".") || "body"}: ${d.msg}`)
+      .join("; ");
+  }
+  return `${status}: ${JSON.stringify(detail)}`;
 }
 
 function toast(message) {
@@ -188,7 +200,16 @@ async function evaluate() {
     customer: {
       id: "SIM-CUST",
       lifetime_orders: Number($("f-lifetime-orders").value || 0),
-      lifetime_value: String(Number(orderTotal || 0) * Number($("f-lifetime-orders").value || 0)),
+      // Exact cents math via BigInt: lifetime value = order total × orders,
+      // computed in cents so no binary-float artifact can reach the API.
+      lifetime_value: (() => {
+        const cents = Math.round(Number(orderTotal || 0) * 100);
+        const orders = Math.max(Number($("f-lifetime-orders").value || 0), 0);
+        const totalCents = BigInt(cents) * BigInt(orders);
+        const major = totalCents / 100n;
+        const minor = totalCents % 100n;
+        return `${major}.${minor.toString().padStart(2, "0")}`;
+      })(),
       previous_refunds: Number($("f-prev-refunds").value || 0),
       previous_refund_value: "0",
       chargebacks: 0,

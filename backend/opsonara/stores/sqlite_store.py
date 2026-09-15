@@ -132,6 +132,27 @@ class SqliteAuditStore:
         ).fetchall()
         return [self._to_stored(row) for row in rows], total
 
+    def _update_human_decision_locked(self, audit_id: str, human_decision: str) -> None:
+        """Persist the fill-in-later ``human_decision`` pointer on an origin row.
+
+        The chain hash columns are untouched: ``fingerprint()`` deliberately
+        excludes ``human_decision``, so :meth:`verify_chain` still passes.
+        The human's verdict is independently chained in its own record.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM audit_records WHERE id = ?", (audit_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"audit record '{audit_id}' not found")
+            data = json.loads(str(row[0]))
+            data["human_decision"] = human_decision
+            self._conn.execute(
+                "UPDATE audit_records SET data = ? WHERE id = ?",
+                (json.dumps(data), audit_id),
+            )
+            self._conn.commit()
+
     def counts(self) -> dict[str, Any]:
         by_decision: dict[str, int] = {d: 0 for d in ("ALLOW", "REVIEW", "BLOCK")}
         by_band: dict[str, int] = {}
@@ -269,6 +290,12 @@ class SqliteReviewStore:
 
         origin = self._audit_store.get(item.audit_id)
         origin.record.human_decision = item.status.value
+        # Persist the origin update. Safe because fingerprint() excludes
+        # human_decision (the fill-in-later field), so the chain still
+        # verifies; the human verdict itself is chained in its own record.
+        self._audit_store._update_human_decision_locked(
+            item.audit_id, item.status.value
+        )
 
         human_record = AuditRecord(
             action=item.action,
