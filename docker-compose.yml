@@ -1,0 +1,9 @@
+services:
+  opsonara:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      OPSONARA_SEED_DEMO_DATA: "true"
+      OPSONARA_LOG_LEVEL: INFO
+    restart: unless-stopped

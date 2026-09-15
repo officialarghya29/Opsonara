@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Opsonara — Agent Transaction Firewall</title>
+  <link rel="icon" type="image/png" href="assets/logo.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <img src="assets/logo.png" alt="Opsonara logo" />
+    <div class="brand">
+      <b>OPSONARA</b>
+      <span>AGENT TRANSACTION FIREWALL</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="chain-pill">chain: checking…</span>
+    <span class="pill" id="api-pill">api: offline</span>
+  </header>
+
+  <main>
+    <!-- ===================== stats ===================== -->
+    <section class="stat-grid" id="stats">
+      <div class="stat"><div class="label">Total decisions</div><div class="value" id="s-total">—</div><div class="sub">evaluated actions</div></div>
+      <div class="stat allow"><div class="label">Allowed</div><div class="value" id="s-allow">—</div><div class="sub">executed automatically</div></div>
+      <div class="stat review"><div class="label">Human review</div><div class="value" id="s-review">—</div><div class="sub" id="s-pending">— pending now</div></div>
+      <div class="stat block"><div class="label">Blocked</div><div class="value" id="s-block">—</div><div class="sub">stopped before execution</div></div>
+    </section>
+
+    <!-- ===================== verdict ===================== -->
+    <section class="verdict" id="verdict">
+      <div class="head">
+        <span class="badge" id="v-badge">ALLOW</span>
+        <span class="muted" id="v-auth"></span>
+        <span class="score" id="v-score"></span>
+      </div>
+      <ul id="v-reasons"></ul>
+    </section>
+
+    <!-- ===================== decision console + distribution ===================== -->
+    <section class="two-col">
+      <div class="panel">
+        <h2><span class="dot"></span> Decision console — simulate an agent action</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label>Action type</label>
+            <select id="f-type">
+              <option value="refund">refund</option>
+              <option value="replacement">replacement</option>
+              <option value="cancel_order">cancel_order</option>
+              <option value="update_shipping">update_shipping</option>
+              <option value="discount">discount</option>
+              <option value="store_credit">store_credit</option>
+              <option value="price_override">price_override</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Amount (INR)</label>
+            <input id="f-amount" value="799" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label>Order total</label>
+            <input id="f-order-total" value="799" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label>Order age (days)</label>
+            <input id="f-order-age" value="5" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label>Agent permission</label>
+            <select id="f-perm">
+              <option value="1" selected>1 · standard</option>
+              <option value="2">2 · senior</option>
+              <option value="3">3 · unrestricted</option>
+              <option value="0">0 · read-only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Lifetime orders</label>
+            <input id="f-lifetime-orders" value="14" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label>Account age (days)</label>
+            <input id="f-account-age" value="420" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label>Previous refunds</label>
+            <input id="f-prev-refunds" value="1" inputmode="numeric" />
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label>Customer message (conversation with the AI agent)</label>
+          <textarea id="f-message" placeholder="e.g. The earphones arrived broken, could you refund the 799 please?"></textarea>
+        </div>
+        <div style="display:flex; gap:10px; margin-top:16px; flex-wrap:wrap">
+          <button class="btn btn-primary" id="btn-evaluate">▶ Evaluate through firewall</button>
+          <button class="btn btn-ghost" id="btn-attack">⚔ Inject attack phrase</button>
+          <button class="btn btn-ghost" id="btn-clear">Clear</button>
+        </div>
+        <p class="muted" style="margin-top:10px">
+          Every evaluation runs through Context → Policy → Risk → Decision and is written to the tamper-evident audit trail.
+        </p>
+      </div>
+
+      <div class="panel">
+        <h2><span class="dot"></span> Decision distribution</h2>
+        <div class="bars">
+          <div class="bar-col allow"><span class="num" id="b-allow">0</span><div class="bar" style="height:10%"></div><span class="cap">ALLOW</span></div>
+          <div class="bar-col review"><span class="num" id="b-review">0</span><div class="bar" style="height:10%"></div><span class="cap">REVIEW</span></div>
+          <div class="bar-col block"><span class="num" id="b-block">0</span><div class="bar" style="height:10%"></div><span class="cap">BLOCK</span></div>
+        </div>
+        <p class="muted" style="margin-top:12px">
+          🟢 ALLOW executes instantly · 🟡 REVIEW waits for a human · 🔴 BLOCK stops the action.
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== review queue ===================== -->
+    <section class="panel">
+      <h2><span class="dot"></span> Human review queue</h2>
+      <div id="reviews"></div>
+    </section>
+
+    <!-- ===================== audit trail ===================== -->
+    <section class="panel">
+      <h2><span class="dot"></span> Audit trail — every decision, explained</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Action</th><th class="mono">Amount</th><th>Decision</th>
+              <th>Risk</th><th class="mono">Injection</th><th>Reasons</th><th>Human</th>
+            </tr>
+          </thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="footer"><b>OPSONARA</b> · Don't make AI agents less autonomous. Make their autonomy controllable.</p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
