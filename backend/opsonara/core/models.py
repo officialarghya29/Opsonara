@@ -13,7 +13,7 @@ import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -116,8 +116,11 @@ class AgentIdentity(BaseModel):
 class ConversationTurn(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    role: str = Field(min_length=1, max_length=16)
-    content: str = Field(max_length=4000)
+    role: Literal["customer", "agent"]
+    """Strict contract: only these two roles exist. Anything else is a
+    client error - a lenient parser here would let mistyped roles silently
+    skip security scanning of customer messages."""
+    content: str = Field(min_length=1, max_length=4000)
 
 
 class ProposedAction(BaseModel):

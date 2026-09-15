@@ -141,9 +141,10 @@ class ReviewStore:
             item.reviewed_by = reviewer
             item.decided_at = datetime.now(UTC)
 
-        # Write the human outcome back onto the originating audit record.
+        # Write the human outcome back onto the originating audit record
+        # via the backend-agnostic store contract.
+        self._audit_store.set_human_decision(item.audit_id, item.status.value)
         origin = self._audit_store.get(item.audit_id)
-        origin.record.human_decision = item.status.value
 
         # Append a new audit entry documenting the human intervention.
         human_record = AuditRecord(

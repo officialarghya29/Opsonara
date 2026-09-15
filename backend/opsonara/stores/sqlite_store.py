@@ -132,7 +132,7 @@ class SqliteAuditStore:
         ).fetchall()
         return [self._to_stored(row) for row in rows], total
 
-    def _update_human_decision_locked(self, audit_id: str, human_decision: str) -> None:
+    def set_human_decision(self, audit_id: str, human_decision: str) -> None:
         """Persist the fill-in-later ``human_decision`` pointer on an origin row.
 
         The chain hash columns are untouched: ``fingerprint()`` deliberately
@@ -282,20 +282,31 @@ class SqliteReviewStore:
             item.status = ReviewStatus.APPROVED if approved else ReviewStatus.REJECTED
             item.reviewed_by = reviewer
             item.decided_at = datetime.now(UTC)
-            self._conn.execute(
-                "UPDATE reviews SET payload = ?, status = ? WHERE id = ?",
-                (json.dumps(item.to_dict()), item.status.value, review_id),
+            # Conditional UPDATE: the WHERE clause re-asserts "pending" inside
+            # the same statement, so two processes (separate connections)
+            # racing on the same review cannot both win — rowcount is 0 for
+            # the loser, which raises AlreadyResolvedError.
+            cursor = self._conn.execute(
+                "UPDATE reviews SET payload = ?, status = ? "
+                "WHERE id = ? AND status = ?",
+                (
+                    json.dumps(item.to_dict()),
+                    item.status.value,
+                    review_id,
+                    ReviewStatus.PENDING.value,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise AlreadyResolvedError(
+                    f"review '{review_id}' already resolved by another worker"
+                )
             self._conn.commit()
 
         origin = self._audit_store.get(item.audit_id)
-        origin.record.human_decision = item.status.value
         # Persist the origin update. Safe because fingerprint() excludes
         # human_decision (the fill-in-later field), so the chain still
         # verifies; the human verdict itself is chained in its own record.
-        self._audit_store._update_human_decision_locked(
-            item.audit_id, item.status.value
-        )
+        self._audit_store.set_human_decision(item.audit_id, item.status.value)
 
         human_record = AuditRecord(
             action=item.action,
@@ -355,11 +366,15 @@ def make_stores(backend: str, db_path: str) -> tuple[Any, Any]:
     if backend == "sqlite":
         audit_store = SqliteAuditStore(db_path)
         return audit_store, SqliteReviewStore(db_path, audit_store)
-    from opsonara.stores.audit_store import AuditStore
-    from opsonara.stores.review_store import ReviewStore
+    if backend == "memory":
+        from opsonara.stores.audit_store import AuditStore
+        from opsonara.stores.review_store import ReviewStore
 
-    memory_audit_store = AuditStore()
-    return memory_audit_store, ReviewStore(memory_audit_store)
+        memory_audit_store = AuditStore()
+        return memory_audit_store, ReviewStore(memory_audit_store)
+    raise ValueError(
+        f"unknown store backend {backend!r}; expected 'memory' or 'sqlite'"
+    )
 
 
 __all__ = ["SqliteAuditStore", "SqliteReviewStore", "make_stores"]

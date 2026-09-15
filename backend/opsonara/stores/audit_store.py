@@ -69,6 +69,19 @@ class AuditStore:
             raise NotFoundError(f"audit record '{audit_id}' not found")
         return stored
 
+    def set_human_decision(self, audit_id: str, human_decision: str) -> None:
+        """Update the fill-in-later ``human_decision`` pointer.
+
+        Part of the store contract used by review queues (memory and SQLite
+        implementations both expose it). Safe with respect to the chain:
+        ``fingerprint()`` excludes ``human_decision`` by design.
+        """
+        with self._lock:
+            stored = self._by_id.get(audit_id)
+            if stored is None:
+                raise NotFoundError(f"audit record '{audit_id}' not found")
+            stored.record.human_decision = human_decision
+
     def list(
         self,
         *,

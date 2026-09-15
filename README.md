@@ -13,7 +13,7 @@
   <a href="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml"><img src="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-5e7aff" alt="python" />
   <img src="https://img.shields.io/badge/fastapi-0.115%2B-22d3ee" alt="fastapi" />
-  <img src="https://img.shields.io/badge/tests-112%20passed-34d399" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-130%20passed-34d399" alt="tests" />
   <img src="https://img.shields.io/badge/mypy-strict%20clean-5e7aff" alt="mypy" />
   <img src="https://img.shields.io/badge/license-MIT-93a1bd" alt="license" />
 </p>
@@ -315,7 +315,7 @@ opsonara/
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 112 unit + integration tests (~97% coverage)
+│   ├── tests/              # 130 unit + integration tests (~97% coverage)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -332,17 +332,17 @@ opsonara/
 | No money-math drift | `Decimal` everywhere; float amounts and sub-cent values (>2 decimal places) rejected at the schema boundary; exact comparisons (no quantized rounding before policy checks) |
 | Tamper-evident audit | SHA-256 hash chain over every decision record — survives restarts with the sqlite backend |
 | Explainable decisions | every verdict carries policy checks, risk factors, and human-readable reasons |
-| Deterministic security | injection escalation is rule-based, never probabilistic |
+| Deterministic security | injection escalation is rule-based, never probabilistic; inputs are Unicode-normalized (NFKC) and stripped of zero-width characters, so homoglyph/zero-width evasion fails; conversation roles are a strict contract |
 | Human-in-the-loop | REVIEW decisions queue for a human; the outcome is appended to the same audit trail |
 | Safe concurrency | thread-safe stores with lock-protected mutation |
-| Verified | 112 tests (~97% coverage) · strict mypy clean · ruff clean · pip-audit clean · CI on every push |
+| Verified | 130 tests (~97% coverage) · strict mypy clean · ruff clean · pip-audit clean · CI on every push · non-root container with healthcheck |
 
 ## Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                # 112 passed (~97% coverage)
+pytest                # 130 passed (~97% coverage)
 mypy opsonara         # no issues in 20 source files
 mypy --disallow-untyped-defs opsonara   # strict mode also clean
 ruff check .          # all checks passed

@@ -16,6 +16,7 @@ then combines with policy status at decision time.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -123,8 +124,32 @@ class InjectionReport:
         return self.verdict != "clean"
 
 
+# Characters invisible or confusable in typical chat rendering. Stripping
+# them closes the classic evasion where "ignore" is written as "ig\u200bore".
+_INVISIBLE_RE = re.compile(
+    r"[\u200b\u200c\u200d\u2060\ufeff\u00ad]"
+)
+
+
+def _normalize_message(message: str) -> str:
+    """Canonicalize a message for matching.
+
+    1. NFKC folds lookalike alphabets (full-width ``\uff49`` -> ``i``,
+       circled letters, ligatures) back to ASCII-compatible forms.
+    2. Invisible characters (zero-width space/joiner, word joiner,
+       BOM, soft hyphen) are stripped entirely.
+    Whitespace collapsing happens per-keyword at match time.
+    """
+    folded = unicodedata.normalize("NFKC", message)
+    return _INVISIBLE_RE.sub("", folded)
+
+
 def analyze_conversation(conversation: Sequence[Any]) -> InjectionReport:
     """Scan customer-side turns and return an :class:`InjectionReport`.
+
+    Inputs are Unicode-normalized (NFKC) and stripped of invisible
+    characters before matching, closing homoglyph and zero-width
+    evasion vectors.
 
     Score semantics: each *distinct* pattern contributes its weight once
     (repetition does not stack). Urgent-pressure contributes half weight on
@@ -135,7 +160,11 @@ def analyze_conversation(conversation: Sequence[Any]) -> InjectionReport:
     lookup per keyword hit — independent of the size of the pattern
     catalogue.
     """
-    customer_messages = [t.content for t in conversation if getattr(t, "role", "") == "customer"]
+    customer_messages = [
+        _normalize_message(t.content)
+        for t in conversation
+        if getattr(t, "role", "") == "customer"
+    ]
 
     if not customer_messages:
         return InjectionReport(verdict="clean", score=Decimal("0"), scanned_messages=0)

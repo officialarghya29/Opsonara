@@ -9,9 +9,14 @@ const API_BASE =
 const $ = (id) => document.getElementById(id);
 
 function esc(value) {
+  // textContent-based escape, hardened for attribute contexts too: quotes
+  // are escaped explicitly because innerHTML does not encode them, and all
+  // audit-trail values flow into double-quoted attributes (title, data-id).
   const div = document.createElement("div");
   div.textContent = String(value ?? "");
-  return div.innerHTML;
+  return div.innerHTML
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function api(path, options) {
