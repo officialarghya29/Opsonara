@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     """Seed the stores with demo transactions so the dashboard is alive on first run."""
     cors_origins: str = "*"
     """Comma-separated allowed origins, or '*' for any (dev default)."""
+    store_backend: str = "memory"
+    """'memory' (default, zero-setup) or 'sqlite' (persists across restarts)."""
+    db_path: str = "opsonara.db"
+    """SQLite database file when store_backend is 'sqlite'."""
 
 
 settings = Settings()

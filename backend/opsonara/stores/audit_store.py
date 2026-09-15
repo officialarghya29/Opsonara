@@ -28,9 +28,9 @@ def _chain_hash(prev_hash: str, fingerprint: str) -> str:
 class StoredAudit:
     """An audit record plus chain metadata."""
 
-    __slots__ = ("id", "record", "prev_hash", "hash")
+    __slots__ = ("hash", "id", "prev_hash", "record")
 
-    def __init__(self, id: str, record: AuditRecord, prev_hash: str) -> None:  # noqa: A002
+    def __init__(self, id: str, record: AuditRecord, prev_hash: str) -> None:
         self.id = id
         self.record = record
         self.prev_hash = prev_hash
@@ -77,16 +77,49 @@ class AuditStore:
         decision: str | None = None,
         agent_id: str | None = None,
     ) -> tuple[list[StoredAudit], int]:
-        """Return (page, total) newest-first with optional filters."""
+        """Return (page, total) newest-first with optional filters.
+
+        Walks the record list backwards (newest first) without copying it;
+        collection stops as soon as the page is filled, though ``total``
+        still requires a full pass when filters are active.
+        """
         with self._lock:
-            records = list(self._records)
-        if decision:
-            records = [r for r in records if r.record.decision.value == decision.upper()]
-        if agent_id:
-            records = [r for r in records if r.record.agent_id == agent_id]
-        records.reverse()  # newest first
-        total = len(records)
-        return records[offset : offset + limit], total
+            records = self._records
+            n = len(records)
+            if not decision and not agent_id:
+                total = n
+                start = max(n - offset, 0)
+                end = max(n - offset - limit, 0)
+                return records[end:start], total
+
+            page: list[StoredAudit] = []
+            total = 0
+            wanted_decision = decision.upper() if decision else None
+            for stored in reversed(records):
+                if wanted_decision and stored.record.decision.value != wanted_decision:
+                    continue
+                if agent_id and stored.record.agent_id != agent_id:
+                    continue
+                if total >= offset and len(page) < limit:
+                    page.append(stored)
+                total += 1
+        return page, total
+
+    def counts(self) -> dict[str, Any]:
+        """Aggregate decision/band counts in one pass (exact at any volume)."""
+        by_decision: dict[str, int] = {}
+        by_band: dict[str, int] = {}
+        with self._lock:
+            total = len(self._records)
+            for stored in self._records:
+                decision = stored.record.decision.value
+                band = stored.record.risk_band.value
+                by_decision[decision] = by_decision.get(decision, 0) + 1
+                by_band[band] = by_band.get(band, 0) + 1
+        # Ensure every known decision appears even at zero.
+        for d in ("ALLOW", "REVIEW", "BLOCK"):
+            by_decision.setdefault(d, 0)
+        return {"total": total, "by_decision": by_decision, "by_risk_band": by_band}
 
     def verify_chain(self) -> bool:
         """Recompute the whole chain; True iff no record was tampered with."""

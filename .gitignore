@@ -16,6 +16,11 @@ build/
 .env
 .env.local
 
+# Local databases
+*.db
+*.db-wal
+*.db-shm
+
 # Editors / OS
 .vscode/
 .idea/

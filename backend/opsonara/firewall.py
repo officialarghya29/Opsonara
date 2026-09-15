@@ -10,11 +10,11 @@ REVIEW) opens an entry in the human review queue.
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from opsonara.core.ids import new_id
 from opsonara.core.models import (
     AgentIdentity,
     AuditRecord,
@@ -29,6 +29,8 @@ from opsonara.engines.context import ContextEngine, RequestContext
 from opsonara.engines.decision import DecisionEngine, DecisionResult
 from opsonara.engines.policy import PolicyEngine
 from opsonara.engines.risk import RiskEngine
+from opsonara.stores.audit_store import AuditStore
+from opsonara.stores.review_store import ReviewStore
 
 
 class FirewallRequest(BaseModel):
@@ -68,7 +70,7 @@ class FirewallResponse(BaseModel):
 class FirewallEngine:
     """Five-stage pipeline with injected stores for audit and reviews."""
 
-    def __init__(self, audit_store, review_store) -> None:  # noqa: ANN001
+    def __init__(self, audit_store: AuditStore, review_store: ReviewStore) -> None:
         self._context = ContextEngine()
         self._policy = PolicyEngine()
         self._risk = RiskEngine()
@@ -162,6 +164,9 @@ class FirewallEngine:
         return merged
 
 
-def new_id(prefix: str) -> str:
-    """Short, readable, collision-safe identifier."""
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+__all__ = [
+    "FirewallEngine",
+    "FirewallRequest",
+    "FirewallResponse",
+    "new_id",
+]

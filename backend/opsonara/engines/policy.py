@@ -26,6 +26,7 @@ from opsonara.core.models import (
     PolicyResult,
     PolicyStatus,
 )
+from opsonara.engines.context import RequestContext
 
 # Actions evaluated against refund-style customer caps.
 REFUND_LIKE: frozenset[ActionType] = frozenset(
@@ -38,7 +39,7 @@ _SHIPPED_STATES = frozenset({"shipped", "delivered", "completed"})
 class PolicyEngine:
     """Stateless rule evaluator — one :meth:`evaluate` call per decision."""
 
-    def evaluate(self, ctx) -> PolicyResult:  # noqa: ANN001 - RequestContext
+    def evaluate(self, ctx: RequestContext) -> PolicyResult:
         checks: list[PolicyCheck] = []
 
         checks.append(self._check_agent_permission(ctx))
@@ -66,7 +67,7 @@ class PolicyEngine:
     # individual rules
     # ------------------------------------------------------------------
 
-    def _check_agent_permission(self, ctx) -> PolicyCheck:
+    def _check_agent_permission(self, ctx: RequestContext) -> PolicyCheck:
         required = ctx.policy.min_permission_level
         actual = ctx.agent.permission_level
         ok = actual >= required
@@ -81,7 +82,7 @@ class PolicyEngine:
             ),
         )
 
-    def _check_spending_band(self, ctx) -> PolicyCheck:
+    def _check_spending_band(self, ctx: RequestContext) -> PolicyCheck:
         p, amount = ctx.policy, ctx.amount
         if amount > p.human_review_limit:
             return PolicyCheck(
@@ -110,7 +111,7 @@ class PolicyEngine:
                 severity="info",
                 detail=(
                     f"amount {amount} {ctx.action.currency} is in the conditional band "
-                    f"({p.auto_approve_limit}–{p.low_risk_limit}) — agent may approve "
+                    f"({p.auto_approve_limit}-{p.low_risk_limit}) — agent may approve "
                     f"only when risk is low"
                 ),
             )
@@ -121,10 +122,7 @@ class PolicyEngine:
             f"{p.auto_approve_limit}",
         )
 
-    def _is_conditional_band(self, ctx) -> bool:
-        return ctx.policy.auto_approve_limit < ctx.amount <= ctx.policy.low_risk_limit
-
-    def _check_refund_ratio(self, ctx) -> PolicyCheck:
+    def _check_refund_ratio(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type not in REFUND_LIKE or ctx.order is None:
             return PolicyCheck(
                 name="refund_ratio", passed=True, detail="not applicable"
@@ -147,7 +145,7 @@ class PolicyEngine:
             detail=f"requested {ctx.amount} within max refund {max_allowed}",
         )
 
-    def _check_refund_window(self, ctx) -> PolicyCheck:
+    def _check_refund_window(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type not in REFUND_LIKE or ctx.order is None:
             return PolicyCheck(
                 name="refund_window", passed=True, detail="not applicable"
@@ -169,7 +167,7 @@ class PolicyEngine:
             detail=f"order age {days}d within the {window}-day window",
         )
 
-    def _check_cancellation(self, ctx) -> PolicyCheck:
+    def _check_cancellation(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type is not ActionType.CANCEL_ORDER:
             return PolicyCheck(
                 name="cancel_policy", passed=True, detail="not applicable"
@@ -195,7 +193,7 @@ class PolicyEngine:
             detail=f"cancellation permitted for order in '{ctx.order.status}'",
         )
 
-    def _check_refund_frequency(self, ctx) -> PolicyCheck:
+    def _check_refund_frequency(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type not in REFUND_LIKE:
             return PolicyCheck(
                 name="refund_frequency", passed=True, detail="not applicable"
@@ -217,7 +215,7 @@ class PolicyEngine:
             detail=f"customer refunds {ctx.customer.previous_refunds}/{cap} within cap",
         )
 
-    def _check_chargebacks(self, ctx) -> PolicyCheck:
+    def _check_chargebacks(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.customer.chargebacks <= 0 or not ctx.policy.block_chargeback_history:
             return PolicyCheck(
                 name="chargeback_history", passed=True, detail="not applicable"
@@ -236,7 +234,7 @@ class PolicyEngine:
             name="chargeback_history", passed=True, detail="not applicable"
         )
 
-    def _check_account_age(self, ctx) -> PolicyCheck:
+    def _check_account_age(self, ctx: RequestContext) -> PolicyCheck:
         min_age = ctx.policy.min_account_age_days
         if ctx.customer.account_age_days >= min_age:
             detail = (
@@ -261,7 +259,7 @@ class PolicyEngine:
             detail="young account but low-value action",
         )
 
-    def _check_discount_cap(self, ctx) -> PolicyCheck:
+    def _check_discount_cap(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type is not ActionType.DISCOUNT:
             return PolicyCheck(
                 name="discount_cap", passed=True, detail="not applicable"
@@ -274,21 +272,25 @@ class PolicyEngine:
                 severity="critical",
                 detail="discount proposed without order context",
             )
-        pct = (ctx.amount / base * Decimal("100")).quantize(Decimal("0.01"))
-        if pct > ctx.policy.max_discount_pct:
+        # Exact comparison via cross-multiplication: quantizing the percentage
+        # before comparing would let a 30.0002% discount slip past a 30% cap.
+        # (amount / base * 100 > cap)  <=>  (amount * 100 > cap * base)
+        if ctx.amount * Decimal("100") > ctx.policy.max_discount_pct * base:
+            pct = (ctx.amount / base * Decimal("100")).quantize(Decimal("0.01"))
             return PolicyCheck(
                 name="discount_cap",
                 passed=False,
                 severity="critical",
                 detail=f"discount {pct}% exceeds the {ctx.policy.max_discount_pct}% cap",
             )
+        pct = (ctx.amount / base * Decimal("100")).quantize(Decimal("0.01"))
         return PolicyCheck(
             name="discount_cap",
             passed=True,
             detail=f"discount {pct}% within the {ctx.policy.max_discount_pct}% cap",
         )
 
-    def _check_currency(self, ctx) -> PolicyCheck:
+    def _check_currency(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.order is None or ctx.action.currency == ctx.order.currency:
             detail = (
                 "not applicable"
@@ -306,7 +308,7 @@ class PolicyEngine:
             ),
         )
 
-    def _check_always_review(self, ctx) -> PolicyCheck:
+    def _check_always_review(self, ctx: RequestContext) -> PolicyCheck:
         if ctx.action.type not in ALWAYS_REVIEW_ACTIONS:
             return PolicyCheck(
                 name="sensitive_action", passed=True, detail="not applicable"

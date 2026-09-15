@@ -19,15 +19,21 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from opsonara.config import settings
 from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
-from opsonara.core.models import Decision
 from opsonara.firewall import FirewallEngine, FirewallRequest
-from opsonara.stores.audit_store import AuditStore
-from opsonara.stores.review_store import ReviewStore
+from opsonara.stores import make_stores
 
 logger = logging.getLogger("opsonara.api")
+
+
+class ReviewDecisionRequest(BaseModel):
+    """Body for the human decision endpoint."""
+
+    approved: bool
+    reviewer: str = Field(min_length=1, max_length=120)
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +71,15 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    audit_store = AuditStore()
-    review_store = ReviewStore(audit_store)
+    audit_store, review_store = make_stores(
+        app_settings.store_backend, app_settings.db_path
+    )
     firewall = FirewallEngine(audit_store=audit_store, review_store=review_store)
 
-    if app_settings.seed_demo_data:
+    # Seed only an empty store: on sqlite this survives restarts without
+    # duplicating demo rows; on memory it runs fresh each boot.
+    _, existing_total = audit_store.list(limit=1)
+    if app_settings.seed_demo_data and existing_total == 0:
         from opsonara.demo_data import seed
 
         seed(audit_store, review_store, firewall)
@@ -118,8 +128,17 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.post("/v1/evaluate", tags=["firewall"])
     async def evaluate(request: FirewallRequest) -> dict[str, Any]:
-        """Evaluate a proposed agent action through the full pipeline."""
-        return firewall.evaluate(request).model_dump(mode="json")
+        """Evaluate a proposed agent action through the full pipeline.
+
+        Inconsistent context (e.g. action.customer_id not matching the
+        order's customer) is a client error, so a raw ``ValueError`` from
+        the context engine is surfaced as HTTP 422 — never a 500.
+        """
+        try:
+            result = firewall.evaluate(request)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return result.model_dump(mode="json")
 
     # ------------------------------------------------------------------
     # audit trail
@@ -171,17 +190,10 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     @app.post("/v1/reviews/{review_id}/decision", tags=["reviews"])
     async def decide_review(
         review_id: str,
-        body: dict[str, Any],
+        body: ReviewDecisionRequest,
     ) -> dict[str, Any]:
-        approved = body.get("approved")
-        reviewer = body.get("reviewer")
-        if not isinstance(approved, bool) or not isinstance(reviewer, str) or not reviewer.strip():
-            raise HTTPException(
-                status_code=422,
-                detail="body must be {\"approved\": bool, \"reviewer\": str}",
-            )
         item, _human_record, human_audit_id = review_store.decide(
-            review_id, approved=approved, reviewer=reviewer.strip()
+            review_id, approved=body.approved, reviewer=body.reviewer.strip()
         )
         return {
             "review": item.to_dict(),
@@ -194,18 +206,14 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/v1/stats", tags=["meta"])
     async def stats() -> dict[str, Any]:
-        all_items, total = audit_store.list(limit=500)
-        by_decision = {d.value: 0 for d in Decision}
-        by_band: dict[str, int] = {}
-        for s in all_items:
-            by_decision[s.record.decision.value] += 1
-            band = s.record.risk_band.value
-            by_band[band] = by_band.get(band, 0) + 1
+        # Computed in one pass over the store — correct at any volume
+        # (a page-limited list would silently undercount past its cap).
+        counts = audit_store.counts()
         pending = review_store.list(status="pending")
         return {
-            "total_decisions": total,
-            "by_decision": by_decision,
-            "by_risk_band": by_band,
+            "total_decisions": counts["total"],
+            "by_decision": counts["by_decision"],
+            "by_risk_band": counts["by_risk_band"],
             "pending_reviews": len(pending),
             "audit_chain_intact": audit_store.verify_chain(),
         }

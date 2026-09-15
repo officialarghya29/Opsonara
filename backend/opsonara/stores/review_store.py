@@ -15,8 +15,8 @@ from decimal import Decimal
 from typing import Any
 
 from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
+from opsonara.core.ids import new_id
 from opsonara.core.models import AuditRecord, ReviewStatus
-from opsonara.firewall import new_id
 
 
 @dataclass(slots=True)

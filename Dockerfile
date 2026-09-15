@@ -10,7 +10,11 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
 ENV OPSONARA_SEED_DEMO_DATA=true \
+    OPSONARA_STORE_BACKEND=sqlite \
+    OPSONARA_DB_PATH=/data/opsonara.db \
     PYTHONUNBUFFERED=1
+
+VOLUME ["/data"]
 
 WORKDIR /srv/backend
 

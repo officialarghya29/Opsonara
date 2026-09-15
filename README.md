@@ -10,9 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml"><img src="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-5e7aff" alt="python" />
   <img src="https://img.shields.io/badge/fastapi-0.115%2B-22d3ee" alt="fastapi" />
-  <img src="https://img.shields.io/badge/tests-80%20passed-34d399" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-91%20passed-34d399" alt="tests" />
   <img src="https://img.shields.io/badge/mypy-strict%20clean-5e7aff" alt="mypy" />
   <img src="https://img.shields.io/badge/license-MIT-93a1bd" alt="license" />
 </p>
@@ -226,7 +227,13 @@ uvicorn opsonara.main:app --reload
 # UI    → http://localhost:8000/app/
 ```
 
-The API seeds 8 realistic demo transactions on first boot (disable with `OPSONARA_SEED_DEMO_DATA=false`).
+The API seeds 8 realistic demo transactions on first boot (disable with `OPSONARA_SEED_DEMO_DATA=false`). To persist the audit trail across restarts, switch to the SQLite backend:
+
+```bash
+OPSONARA_STORE_BACKEND=sqlite OPSONARA_DB_PATH=opsonara.db uvicorn opsonara.main:app --reload
+```
+
+For Docker/GHCR deployment, see [DEPLOY.md](DEPLOY.md).
 
 **Evaluate an action through the firewall:**
 
@@ -288,6 +295,8 @@ The dashboard ships with the API at **`/app/`** — dark, futuristic, operator-f
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `OPSONARA_STORE_BACKEND` | `memory` | `memory` or `sqlite` (persists audit + reviews) |
+| `OPSONARA_DB_PATH` | `opsonara.db` | SQLite file when the sqlite backend is enabled |
 | `OPSONARA_SEED_DEMO_DATA` | `true` | Seed demo transactions on boot |
 | `OPSONARA_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `OPSONARA_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
@@ -298,20 +307,21 @@ The dashboard ships with the API at **`/app/`** — dark, futuristic, operator-f
 opsonara/
 ├── backend/
 │   ├── opsonara/
-│   │   ├── core/           # domain models, injection detector, exceptions
+│   │   ├── core/           # domain models, injection detector, exceptions, ids
 │   │   ├── engines/        # context → policy → risk → decision
-│   │   ├── stores/         # hash-chained audit log, review queue
+│   │   ├── stores/         # audit log + review queue (memory & sqlite backends)
 │   │   ├── firewall.py     # five-stage pipeline orchestrator
 │   │   ├── config.py       # env-driven settings
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
-│   ├── tests/              # 80 unit + integration tests
+│   ├── benchmarks/         # efficiency benchmark suite
+│   ├── tests/              # 91 unit + integration tests
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
-├── docs/                   # logo, screenshot
-├── .github/workflows/ci.yml
-├── Dockerfile · docker-compose.yml
+├── docs/                   # logo, screenshot, BENCHMARKS.md
+├── .github/workflows/      # ci.yml (test+lint+types) · publish.yml (GHCR image)
+├── Dockerfile · docker-compose.yml · DEPLOY.md
 └── LICENSE
 ```
 
@@ -319,29 +329,36 @@ opsonara/
 
 | Guarantee | How |
 |---|---|
-| No money-math drift | `Decimal` everywhere; float amounts rejected at the schema boundary |
-| Tamper-evident audit | SHA-256 hash chain over every decision record |
+| No money-math drift | `Decimal` everywhere; float amounts rejected at the schema boundary; exact comparisons (no quantized rounding before policy checks) |
+| Tamper-evident audit | SHA-256 hash chain over every decision record — survives restarts with the sqlite backend |
 | Explainable decisions | every verdict carries policy checks, risk factors, and human-readable reasons |
 | Deterministic security | injection escalation is rule-based, never probabilistic |
 | Human-in-the-loop | REVIEW decisions queue for a human; the outcome is appended to the same audit trail |
 | Safe concurrency | thread-safe stores with lock-protected mutation |
-| Verified | 80 tests · mypy clean · ruff clean · CI on every push |
+| Verified | 90 tests · strict mypy clean · ruff clean · pip-audit clean · CI on every push |
 
 ## Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                # 80 passed
-mypy opsonara         # no issues in 17 source files
+pytest                # 91 passed
+mypy opsonara         # no issues in 19 source files
+mypy --disallow-untyped-defs opsonara   # strict mode also clean
 ruff check .          # all checks passed
 ```
 
-CI runs the full matrix (pytest + mypy + ruff) on Python 3.11 and 3.12 for every push and pull request.
+CI runs the full matrix (pytest + mypy + ruff) on Python 3.11 and 3.12 for every push and pull request, and `publish.yml` builds the Docker image to GHCR.
+
+## Performance
+
+The pipeline sustains **~2,100–2,500 evaluations/s per core cold (≈0.4 ms each) and ~5,000–7,000/s warm** across all three decision paths. Efficiency benchmarks, the optimization log (injection scan +36–45%, audit listing 37×), and the ranked improvement roadmap live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Roadmap
 
-- [ ] Postgres-backed audit & review stores (same interfaces, drop-in)
+- [x] SQLite-backed audit & review stores (same interfaces, drop-in)
+- [x] Docker image publishing (GHCR) + deployment guide
+- [ ] Postgres-backed stores for multi-instance deployments
 - [ ] Per-brand API keys and multi-tenant policy packs
 - [ ] Shopify / WooCommerce connector adapters
 - [ ] ML-assisted behavioral anomaly scoring (heuristics today, models tomorrow)

@@ -143,6 +143,20 @@ class TestDiscountCap:
         result = evaluate(ctx)
         assert result.status.value == "denied"
 
+    def test_discount_subcent_over_cap_denied(self, default_policy):
+        # 1501 on a 5000 base is 30.02% — must be caught even though the
+        # displayed percentage rounds to 30.02 (regression: quantized
+        # comparison let a 30.0002% discount pass a 30% cap).
+        ctx = build_ctx(make_action(type_="discount", amount="1501"), make_agent(), make_customer(), make_order(total="5000"), default_policy)
+        result = evaluate(ctx)
+        assert result.status.value == "denied"
+
+    def test_discount_exactly_at_cap_allowed(self, default_policy):
+        # 1500 on a 5000 base is exactly 30.00% — allowed (cap is inclusive).
+        ctx = build_ctx(make_action(type_="discount", amount="1500"), make_agent(), make_customer(), make_order(total="5000"), default_policy)
+        check = next(c for c in evaluate(ctx).checks if c.name == "discount_cap")
+        assert check.passed
+
 
 class TestCurrencyIntegrity:
     def test_currency_mismatch_denied(self, default_policy):

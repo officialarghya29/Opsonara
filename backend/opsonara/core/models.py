@@ -319,7 +319,7 @@ class AuditRecord(BaseModel):
     customer_risk: Decimal
     injection_risk: Decimal
     risk_score: Decimal = Field(default=Decimal("0"))
-    """Composite transaction risk (0.0–1.0) — the weighted mean of all factors."""
+    """Composite transaction risk (0.0-1.0) — the weighted mean of all factors."""
     risk_band: RiskBand
     policy_status: str
     authorization: str

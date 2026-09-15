@@ -39,6 +39,7 @@ from opsonara.core.models import (
     RiskFactor,
     RiskResult,
 )
+from opsonara.engines.context import RequestContext
 
 _WEIGHT_VALUE = Decimal("0.30")
 _WEIGHT_CUSTOMER = Decimal("0.20")
@@ -79,7 +80,7 @@ def _band_index(band: RiskBand) -> int:
 class RiskEngine:
     """Stateless risk scorer — one :meth:`evaluate` call per decision."""
 
-    def evaluate(self, ctx) -> RiskResult:  # noqa: ANN001 - RequestContext
+    def evaluate(self, ctx: RequestContext) -> RiskResult:
         injection_report = analyze_conversation(ctx.conversation)
         factors = [
             self._factor_value_size(ctx),
@@ -130,7 +131,7 @@ class RiskEngine:
     # factors
     # ------------------------------------------------------------------
 
-    def _factor_value_size(self, ctx) -> RiskFactor:
+    def _factor_value_size(self, ctx: RequestContext) -> RiskFactor:
         """Transaction value relative to the brand's human-review limit.
 
         Value risk scales with the amount itself — a full refund of a small
@@ -158,7 +159,7 @@ class RiskEngine:
             detail=detail,
         )
 
-    def _factor_customer_history(self, ctx) -> RiskFactor:
+    def _factor_customer_history(self, ctx: RequestContext) -> RiskFactor:
         """Inverse of the derived trust score plus hard flags."""
         score = Decimal("1") - ctx.history.trust_score
         if "new_account" in ctx.history.flags:
@@ -190,7 +191,7 @@ class RiskEngine:
             detail=verdict_detail,
         )
 
-    def _factor_behavioral(self, ctx) -> RiskFactor:
+    def _factor_behavioral(self, ctx: RequestContext) -> RiskFactor:
         """Refund frequency/intensity and unusual action sequences."""
         score = max(ctx.history.refund_frequency, ctx.history.refund_intensity * Decimal("0.8"))
         bits: list[str] = [
@@ -213,7 +214,7 @@ class RiskEngine:
             detail="; ".join(bits),
         )
 
-    def _factor_sensitivity(self, ctx) -> RiskFactor:
+    def _factor_sensitivity(self, ctx: RequestContext) -> RiskFactor:
         score = _SENSITIVITY.get(ctx.action.type, Decimal("0.20"))
         return RiskFactor(
             name="action_sensitivity",

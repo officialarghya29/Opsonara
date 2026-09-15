@@ -16,8 +16,10 @@ then combines with policy status at decision time.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 __all__ = ["InjectionReport", "analyze_conversation"]
 
@@ -84,14 +86,24 @@ def _word_boundary_regex(keyword: str) -> str:
     return r"\b" + r"\s+".join(parts) + r"\b"
 
 
-# Compiled pattern catalogue: pattern name -> regex over its keywords.
-_COMPILED: dict[str, re.Pattern[str]] = {
-    pattern.name: re.compile(
-        r"|".join(_word_boundary_regex(kw) for kw in pattern.keywords),
-        re.IGNORECASE,
-    )
+# Precomputed keyword catalogue: each keyword maps directly to the pattern
+# that owns it. This lets the scanner do ONE regex pass per message and an
+# O(1) dict lookup per hit, instead of re-running every pattern's regex over
+# every message (which made cost grow linearly with the pattern catalogue).
+_KEYWORD_WEIGHTS: dict[str, tuple[str, Decimal]] = {
+    keyword: (pattern.name, pattern.weight)
     for pattern in _PATTERNS
+    for keyword in pattern.keywords
 }
+
+_ALL_KEYWORDS_RE: re.Pattern[str] = re.compile(
+    r"|".join(_word_boundary_regex(keyword) for keyword in _KEYWORD_WEIGHTS),
+    re.IGNORECASE,
+)
+
+# Solo urgent-pressure is weak evidence; it contributes only this fraction
+# of its weight when no other pattern fired (see analyze_conversation).
+_SOLO_PRESSURE_FACTOR = Decimal("0.5")
 
 
 @dataclass(slots=True)
@@ -111,27 +123,36 @@ class InjectionReport:
         return self.verdict != "clean"
 
 
-def analyze_conversation(conversation) -> InjectionReport:  # noqa: ANN001
+def analyze_conversation(conversation: Sequence[Any]) -> InjectionReport:
     """Scan customer-side turns and return an :class:`InjectionReport`.
 
     Score semantics: each *distinct* pattern contributes its weight once
     (repetition does not stack). Urgent-pressure contributes half weight on
     its own — it is common in legitimate complaints and only meaningful when
     other manipulation signals co-occur.
+
+    Complexity: one regex pass over each customer message plus an O(1) dict
+    lookup per keyword hit — independent of the size of the pattern
+    catalogue.
     """
     customer_messages = [t.content for t in conversation if getattr(t, "role", "") == "customer"]
-    report = InjectionReport(verdict="clean", score=Decimal("0"), scanned_messages=len(customer_messages))
 
     if not customer_messages:
-        return report
+        return InjectionReport(verdict="clean", score=Decimal("0"), scanned_messages=0)
 
     hits: dict[str, list[str]] = {}
-    for name, regex in _COMPILED.items():
-        for msg in customer_messages:
-            m = regex.search(msg)
-            if m:
-                hits.setdefault(name, []).append(m.group(0))
-                break  # one evidence snippet per pattern is enough
+    for msg in customer_messages:
+        for m in _ALL_KEYWORDS_RE.finditer(msg):
+            keyword = m.group(0).lower()
+            # Collapse whitespace so multi-word hits canonicalize correctly.
+            keyword = " ".join(keyword.split())
+            name_and_weight = _KEYWORD_WEIGHTS.get(keyword)
+            if name_and_weight is None:
+                # Regex is case-insensitive; the literal keyword must exist.
+                continue
+            name, _weight = name_and_weight
+            if name not in hits:
+                hits[name] = [m.group(0)]
 
     score = Decimal("0")
     for pattern in _PATTERNS:
@@ -139,7 +160,7 @@ def analyze_conversation(conversation) -> InjectionReport:  # noqa: ANN001
             score += pattern.weight
     # Solo urgent-pressure is weak evidence; halve it when nothing else fired.
     if hits.keys() == {"urgent_pressure"}:
-        score = Decimal("0.05")
+        score *= _SOLO_PRESSURE_FACTOR
 
     score = min(score, Decimal("1"))
 

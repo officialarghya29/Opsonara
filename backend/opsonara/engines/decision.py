@@ -21,8 +21,9 @@ an agent can never argue its way past a critical risk score.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
-from opsonara.core.models import Decision, PolicyStatus, RiskBand
+from opsonara.core.models import BrandPolicy, Decision, PolicyStatus, RiskBand
 from opsonara.engines.policy import POLICY_TO_DECISION
 from opsonara.engines.risk import RISK_TO_DECISION
 
@@ -43,8 +44,8 @@ class DecisionEngine:
         *,
         policy_status: PolicyStatus,
         risk_band: RiskBand,
-        amount,
-        policy,  # BrandPolicy
+        amount: Decimal,
+        policy: BrandPolicy,
         injection_flagged: bool,
     ) -> DecisionResult:
         policy_decision = POLICY_TO_DECISION[policy_status]

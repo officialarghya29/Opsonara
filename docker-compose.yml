@@ -6,4 +6,11 @@ services:
     environment:
       OPSONARA_SEED_DEMO_DATA: "true"
       OPSONARA_LOG_LEVEL: INFO
+      OPSONARA_STORE_BACKEND: sqlite
+      OPSONARA_DB_PATH: /data/opsonara.db
+    volumes:
+      - opsonara-data:/data
     restart: unless-stopped
+
+volumes:
+  opsonara-data:
