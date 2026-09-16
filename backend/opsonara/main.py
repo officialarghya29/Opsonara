@@ -146,8 +146,10 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/v1/audit/verify", tags=["audit"])
     async def verify_chain() -> dict[str, Any]:
+        # force=True: the authoritative integrity endpoint must walk the
+        # whole chain, not trust the incremental verified-prefix cache.
         return {
-            "intact": audit_store.verify_chain(),
+            "intact": audit_store.verify_chain(force=True),
             "scheme": "sha256 hash-chain (each record commits to its predecessor)",
         }
 
@@ -206,15 +208,15 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.get("/v1/stats", tags=["meta"])
     async def stats() -> dict[str, Any]:
-        # Computed in one pass over the store — correct at any volume
-        # (a page-limited list would silently undercount past its cap).
+        # All components are O(1) per call (incremental counters), so the
+        # endpoint stays correct and cheap at any volume. A page-limited
+        # list would silently undercount past its cap.
         counts = audit_store.counts()
-        pending = review_store.list(status="pending")
         return {
             "total_decisions": counts["total"],
             "by_decision": counts["by_decision"],
             "by_risk_band": counts["by_risk_band"],
-            "pending_reviews": len(pending),
+            "pending_reviews": review_store.count_pending(),
             "audit_chain_intact": audit_store.verify_chain(),
         }
 

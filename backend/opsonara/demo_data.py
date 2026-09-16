@@ -18,8 +18,7 @@ from opsonara.core.models import (
     ProposedAction,
 )
 from opsonara.firewall import FirewallEngine, FirewallRequest
-from opsonara.stores.audit_store import AuditStore
-from opsonara.stores.review_store import ReviewStore
+from opsonara.stores.protocols import AuditStoreProtocol, ReviewStoreProtocol
 
 
 def _policy(brand_id: str = "brand_demo") -> BrandPolicy:
@@ -53,7 +52,11 @@ def _order(
     )
 
 
-def seed(audit_store: AuditStore, review_store: ReviewStore, firewall: FirewallEngine) -> None:
+def seed(
+    audit_store: AuditStoreProtocol,
+    review_store: ReviewStoreProtocol,
+    firewall: FirewallEngine,
+) -> None:
     """Run a representative set of transactions through the pipeline."""
 
     scenarios: list[FirewallRequest] = [

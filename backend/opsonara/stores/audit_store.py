@@ -52,6 +52,16 @@ class AuditStore:
         self._records: list[StoredAudit] = []
         self._by_id: dict[str, StoredAudit] = {}
         self._prev_hash = _GENESIS
+        # Incremental-verification state: the chain is append-only, so once
+        # a prefix is verified it stays verified unless someone mutates
+        # records in place (which only happens outside the store API).
+        self._verified_count = 0
+        self._verified_ok = True
+        self._verified_hash = _GENESIS
+        # O(1) aggregate counters, updated on every append (see counts()).
+        self._total = 0
+        self._by_decision: dict[str, int] = {d: 0 for d in ("ALLOW", "REVIEW", "BLOCK")}
+        self._by_band: dict[str, int] = {}
 
     def append(self, record: AuditRecord) -> str:
         with self._lock:
@@ -60,6 +70,14 @@ class AuditStore:
             self._records.append(stored)
             self._by_id[audit_id] = stored
             self._prev_hash = stored.hash
+            # Keep aggregates exact at O(1) per append.
+            self._total += 1
+            self._by_decision[record.decision.value] = (
+                self._by_decision.get(record.decision.value, 0) + 1
+            )
+            self._by_band[record.risk_band.value] = (
+                self._by_band.get(record.risk_band.value, 0) + 1
+            )
             return audit_id
 
     def get(self, audit_id: str) -> StoredAudit:
@@ -119,30 +137,55 @@ class AuditStore:
         return page, total
 
     def counts(self) -> dict[str, Any]:
-        """Aggregate decision/band counts in one pass (exact at any volume)."""
-        by_decision: dict[str, int] = {}
-        by_band: dict[str, int] = {}
+        """Aggregate decision/band counts, O(1) via counters kept on append.
+
+        Counters are updated inside the same lock as the append, so they are
+        always exact - no periodic rescan needed.
+        """
+        with self._lock:
+            return {
+                "total": self._total,
+                "by_decision": dict(self._by_decision),
+                "by_risk_band": dict(self._by_band),
+            }
+
+    def verify_chain(self, force: bool = False) -> bool:
+        """Verify the hash chain; O(new records) instead of O(total).
+
+        Verified-prefix caching: ``verify_chain()`` only walks records
+        appended since the last successful verification. Pass
+        ``force=True`` for a full, authoritative walk (integrity endpoints,
+        tamper audits). In-place mutation outside the store API is only
+        guaranteed to be caught by a forced walk.
+        """
         with self._lock:
             total = len(self._records)
-            for stored in self._records:
-                decision = stored.record.decision.value
-                band = stored.record.risk_band.value
-                by_decision[decision] = by_decision.get(decision, 0) + 1
-                by_band[band] = by_band.get(band, 0) + 1
-        # Ensure every known decision appears even at zero.
-        for d in ("ALLOW", "REVIEW", "BLOCK"):
-            by_decision.setdefault(d, 0)
-        return {"total": total, "by_decision": by_decision, "by_risk_band": by_band}
-
-    def verify_chain(self) -> bool:
-        """Recompute the whole chain; True iff no record was tampered with."""
-        with self._lock:
-            records = list(self._records)
-        expected_prev = _GENESIS
-        for stored in records:
-            if stored.prev_hash != expected_prev:
-                return False
-            if stored.hash != _chain_hash(expected_prev, stored.record.fingerprint()):
-                return False
-            expected_prev = stored.hash
-        return True
+            if not force and self._verified_ok and self._verified_count == total:
+                return True
+            # A forced walk must restart from the genesis hash - trusting the
+            # cached prefix here would be exactly the hole force exists to
+            # close (caught by test_chain_detects_tampering).
+            if force or not self._verified_ok:
+                start = 0
+                expected_prev = _GENESIS
+            else:
+                start = self._verified_count
+                expected_prev = self._verified_hash
+            ok = True
+            for stored in self._records[start:]:
+                if stored.prev_hash != expected_prev:
+                    ok = False
+                    break
+                if stored.hash != _chain_hash(expected_prev, stored.record.fingerprint()):
+                    ok = False
+                    break
+                expected_prev = stored.hash
+            if ok:
+                self._verified_count = total
+                self._verified_hash = expected_prev
+                self._verified_ok = True
+            else:
+                self._verified_count = 0
+                self._verified_hash = _GENESIS
+                self._verified_ok = False
+            return ok

@@ -13,7 +13,7 @@
   <a href="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml"><img src="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-5e7aff" alt="python" />
   <img src="https://img.shields.io/badge/fastapi-0.115%2B-22d3ee" alt="fastapi" />
-  <img src="https://img.shields.io/badge/tests-130%20passed-34d399" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-137%20passed-34d399" alt="tests" />
   <img src="https://img.shields.io/badge/mypy-strict%20clean-5e7aff" alt="mypy" />
   <img src="https://img.shields.io/badge/license-MIT-93a1bd" alt="license" />
 </p>
@@ -315,7 +315,7 @@ opsonara/
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 130 unit + integration tests (~97% coverage)
+│   ├── tests/              # 137 unit + integration tests (~97% coverage)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -335,14 +335,14 @@ opsonara/
 | Deterministic security | injection escalation is rule-based, never probabilistic; inputs are Unicode-normalized (NFKC) and stripped of zero-width characters, so homoglyph/zero-width evasion fails; conversation roles are a strict contract |
 | Human-in-the-loop | REVIEW decisions queue for a human; the outcome is appended to the same audit trail |
 | Safe concurrency | thread-safe stores with lock-protected mutation |
-| Verified | 130 tests (~97% coverage) · strict mypy clean · ruff clean · pip-audit clean · CI on every push · non-root container with healthcheck |
+| Verified | 137 tests (~97% coverage) · strict mypy clean · ruff clean · pip-audit clean · CI on every push · non-root container with healthcheck |
 
 ## Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                # 130 passed (~97% coverage)
+pytest                # 137 passed (~97% coverage)
 mypy opsonara         # no issues in 20 source files
 mypy --disallow-untyped-defs opsonara   # strict mode also clean
 ruff check .          # all checks passed
@@ -352,7 +352,7 @@ CI runs the full matrix (pytest + mypy + ruff) on Python 3.11 and 3.12 for every
 
 ## Performance
 
-The pipeline sustains **~2,100–2,500 evaluations/s per core cold (≈0.4 ms each) and ~5,000–7,000/s warm** across all three decision paths. Efficiency benchmarks, the optimization log (injection scan +36–45%, audit listing 37×), and the ranked improvement roadmap live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The pipeline sustains **~2,100–2,500 evaluations/s per core cold (≈0.4 ms each) and ~5,000–7,000/s warm** across all three decision paths. Under concurrent HTTP load (real uvicorn server, threaded clients, chain integrity asserted after every run): mixed evaluate traffic reaches **~1,160 req/s (memory) / ~690 req/s (SQLite)** at 32 threads with zero errors, and the `/v1/stats` endpoint serves a populated store at **~8,500 req/s** after its hot path was made O(1). Full numbers, methodology, and the ranked improvement roadmap live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Roadmap
 

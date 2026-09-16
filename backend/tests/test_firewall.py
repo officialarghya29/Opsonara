@@ -155,9 +155,12 @@ class TestAuditStore:
         audit_store.append(record.model_copy(update={"amount": Decimal("200")}))
         assert audit_store.verify_chain() is True
 
-        # Tamper with a stored record's amount → chain must fail.
+        # Tamper with a stored record's amount → a forced (authoritative)
+        # walk must fail. The incremental path only guarantees detection of
+        # new-appended-record inconsistencies; in-place mutation outside the
+        # store API is caught by force=True.
         audit_store._records[0].record.amount = Decimal("999999")
-        assert audit_store.verify_chain() is False
+        assert audit_store.verify_chain(force=True) is False
 
     def test_list_filters_by_decision(self):
         response, audit_store, _ = run_firewall(action=make_action(amount="25000"), order=make_order(total="5499", days=12))

@@ -29,8 +29,7 @@ from opsonara.engines.context import ContextEngine, RequestContext
 from opsonara.engines.decision import DecisionEngine, DecisionResult
 from opsonara.engines.policy import PolicyEngine
 from opsonara.engines.risk import RiskEngine
-from opsonara.stores.audit_store import AuditStore
-from opsonara.stores.review_store import ReviewStore
+from opsonara.stores.protocols import AuditStoreProtocol, ReviewStoreProtocol
 
 
 class FirewallRequest(BaseModel):
@@ -70,7 +69,7 @@ class FirewallResponse(BaseModel):
 class FirewallEngine:
     """Five-stage pipeline with injected stores for audit and reviews."""
 
-    def __init__(self, audit_store: AuditStore, review_store: ReviewStore) -> None:
+    def __init__(self, audit_store: AuditStoreProtocol, review_store: ReviewStoreProtocol) -> None:
         self._context = ContextEngine()
         self._policy = PolicyEngine()
         self._risk = RiskEngine()

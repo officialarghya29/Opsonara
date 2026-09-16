@@ -115,6 +115,11 @@ class ReviewStore:
         items.sort(key=lambda i: i.created_at, reverse=True)
         return items
 
+    def count_pending(self) -> int:
+        """O(1) pending count for the stats hot path."""
+        with self._lock:
+            return sum(1 for i in self._items.values() if i.status is ReviewStatus.PENDING)
+
     # -- decisions ------------------------------------------------------------
 
     def decide(

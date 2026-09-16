@@ -9,12 +9,15 @@
 """
 
 from opsonara.stores.audit_store import AuditStore
+from opsonara.stores.protocols import AuditStoreProtocol, ReviewStoreProtocol
 from opsonara.stores.review_store import ReviewStore
 from opsonara.stores.sqlite_store import SqliteAuditStore, SqliteReviewStore, make_stores
 
 __all__ = [
     "AuditStore",
+    "AuditStoreProtocol",
     "ReviewStore",
+    "ReviewStoreProtocol",
     "SqliteAuditStore",
     "SqliteReviewStore",
     "make_stores",

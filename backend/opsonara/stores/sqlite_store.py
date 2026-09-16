@@ -26,6 +26,7 @@ from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
 from opsonara.core.ids import new_id
 from opsonara.core.models import AuditRecord, ReviewStatus
 from opsonara.stores.audit_store import _GENESIS, StoredAudit, _chain_hash
+from opsonara.stores.protocols import AuditStoreProtocol, ReviewStoreProtocol
 from opsonara.stores.review_store import ReviewItem
 
 _SCHEMA = """
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     payload     TEXT NOT NULL,
     status      TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
 """
 
 
@@ -58,7 +60,18 @@ class SqliteAuditStore:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # WAL + synchronous=NORMAL: commits don't fsync (the WAL survives
+        # process crashes); power-loss can at most roll back the tail, which
+        # the hash chain then *detects*. Durability-critical deployments can
+        # override with PRAGMA synchronous=FULL.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.commit()
+        # Incremental-verification state (see verify_chain).
+        self._verified_ok = True
+        self._verified_last = (-1, _GENESIS)
+        # Seed O(1) aggregate counters once at startup; appends keep them
+        # exact. (A restart rescan is unavoidable and acceptable - once.)
+        self._seed_counts()
 
     # -- internal ------------------------------------------------------------
 
@@ -75,6 +88,14 @@ class SqliteAuditStore:
                 stored.hash,
                 stored.prev_hash,
             ),
+        )
+        # Keep aggregate counters exact (same lock as append).
+        self._total += 1
+        self._by_decision[record.decision.value] = (
+            self._by_decision.get(record.decision.value, 0) + 1
+        )
+        self._by_band[record.risk_band.value] = (
+            self._by_band.get(record.risk_band.value, 0) + 1
         )
         return audit_id
 
@@ -153,27 +174,78 @@ class SqliteAuditStore:
             )
             self._conn.commit()
 
-    def counts(self) -> dict[str, Any]:
-        by_decision: dict[str, int] = {d: 0 for d in ("ALLOW", "REVIEW", "BLOCK")}
-        by_band: dict[str, int] = {}
+    def _seed_counts(self) -> None:
+        """One-time GROUP BY at startup; afterwards counters are O(1)."""
+        self._total = 0
+        self._by_decision: dict[str, int] = {d: 0 for d in ("ALLOW", "REVIEW", "BLOCK")}
+        self._by_band: dict[str, int] = {}
         for row in self._conn.execute(
             "SELECT json_extract(data, '$.decision'), "
             "json_extract(data, '$.risk_band'), COUNT(*) "
             "FROM audit_records GROUP BY 1, 2"
         ):
             decision, band, count = str(row[0]), str(row[1]), int(row[2])
-            by_decision[decision] = by_decision.get(decision, 0) + count
-            by_band[band] = by_band.get(band, 0) + count
+            self._by_decision[decision] = self._by_decision.get(decision, 0) + count
+            self._by_band[band] = self._by_band.get(band, 0) + count
         total_row = self._conn.execute("SELECT COUNT(*) FROM audit_records").fetchone()
-        return {"total": int(total_row[0]), "by_decision": by_decision, "by_risk_band": by_band}
+        self._total = int(total_row[0])
 
-    def verify_chain(self) -> bool:
-        expected_prev = _GENESIS
-        rows = self._conn.execute(
-            "SELECT record_hash, prev_hash, data FROM audit_records ORDER BY seq ASC"
-        ).fetchall()
-        for record_hash, prev_hash, data in rows:
-            record_hash, prev_hash, data = str(record_hash), str(prev_hash), str(data)
+    def counts(self) -> dict[str, Any]:
+        """Aggregate counts, O(1): seeded once at startup, kept exact on append."""
+        with self._lock:
+            return {
+                "total": self._total,
+                "by_decision": dict(self._by_decision),
+                "by_risk_band": dict(self._by_band),
+            }
+
+    def verify_chain(self, force: bool = False) -> bool:
+        """Verify the hash chain incrementally.
+
+        Default calls only walk rows appended since the last successful
+        verification (keyed on ``(max seq, last hash)``). ``force=True``
+        walks the whole table - integrity endpoints and tamper audits must
+        not trust cached prefixes.
+        """
+        with self._lock:
+            last = self._last_row()
+            if (
+                not force
+                and self._verified_ok
+                and last is not None
+                and (last[0], last[1]) == self._verified_last
+            ):
+                return True
+            # A forced walk must restart from genesis - trusting the cached
+            # prefix would defeat the purpose of force=True.
+            start_seq = -1 if (force or not self._verified_ok) else self._verified_last[0]
+            rows = self._conn.execute(
+                "SELECT seq, record_hash, prev_hash, data FROM audit_records "
+                "WHERE seq > ? ORDER BY seq ASC",
+                (start_seq,),
+            ).fetchall()
+            expected_prev = (
+                _GENESIS if (force or not self._verified_ok) else self._verified_last[1]
+            )
+            ok = True
+            for _seq, record_hash, prev_hash, data in rows:
+                record_hash, prev_hash, data = str(record_hash), str(prev_hash), str(data)
+                if prev_hash != expected_prev:
+                    ok = False
+                    break
+                record = AuditRecord(**json.loads(data))
+                if record_hash != _chain_hash(expected_prev, record.fingerprint()):
+                    ok = False
+                    break
+                expected_prev = record_hash
+            new_last = self._last_row()
+            if ok:
+                if new_last is not None:
+                    self._verified_last = (new_last[0], new_last[1])
+                self._verified_ok = True
+            else:
+                self._verified_ok = False
+            return ok
             if prev_hash != expected_prev:
                 return False
             record = AuditRecord(**json.loads(data))
@@ -202,6 +274,7 @@ class SqliteReviewStore:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.commit()
         self._audit_store = audit_store
 
@@ -248,18 +321,27 @@ class SqliteReviewStore:
         return self._to_item(row)
 
     def list(self, *, status: str | None = None) -> list[ReviewItem]:
+        # ORDER BY rowid DESC == newest-first (insertion order) without the
+        # expensive per-row json_extract sort; status uses the index.
         if status:
             rows = self._conn.execute(
                 "SELECT payload, status FROM reviews WHERE status = ? "
-                "ORDER BY json_extract(payload, '$.created_at') DESC",
+                "ORDER BY rowid DESC",
                 (ReviewStatus(status.lower()).value,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT payload, status FROM reviews "
-                "ORDER BY json_extract(payload, '$.created_at') DESC"
+                "SELECT payload, status FROM reviews ORDER BY rowid DESC"
             ).fetchall()
         return [self._to_item(row) for row in rows]
+
+    def count_pending(self) -> int:
+        """O(log n) via the status index - no row materialization."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE status = ?",
+            (ReviewStatus.PENDING.value,),
+        ).fetchone()
+        return int(row[0])
 
     def decide(
         self,
@@ -357,7 +439,9 @@ class SqliteReviewStore:
         )
 
 
-def make_stores(backend: str, db_path: str) -> tuple[Any, Any]:
+def make_stores(
+    backend: str, db_path: str
+) -> tuple[AuditStoreProtocol, ReviewStoreProtocol]:
     """Factory honoring ``OPSONARA_STORE_BACKEND`` (memory | sqlite).
 
     Returns ``(audit_store, review_store)``; both share the SQLite database

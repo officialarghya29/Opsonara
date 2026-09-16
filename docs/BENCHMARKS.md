@@ -46,22 +46,45 @@ python benchmarks/bench.py --markdown # paste-ready table
 | DecisionEngine.decide | 7,600 ops/s* | 250,000 ops/s | **33×** | *bench bug: earlier run re-executed policy+risk inside the timed lambda; combiner itself is O(1) |
 | Audit list (25 newest of N) | 8,900 ops/s | 325,000 ops/s | **37×** | reverse slice of the backing list instead of full copy + reverse per call |
 
+## HTTP load tests (real server, concurrent clients)
+
+Run with `backend/benchmarks/loadtest.py` (spawns uvicorn, drives it with a
+threaded stdlib HTTP client, asserts chain integrity and decision totals
+afterwards). All runs with zero errors; the hash chain verified intact under
+load in every scenario.
+
+| Scenario (populated store) | Before optimization | After | Notes |
+|---|---|---|---|
+| `/v1/evaluate` mixed traffic, 32 threads, SQLite | 394 req/s · p50 82 ms | **689 req/s · p50 46 ms** | `synchronous=NORMAL` under WAL |
+| `/v1/evaluate` mixed traffic, 32 threads, memory | — | **1,158 req/s · p50 24 ms** | (2,458 req/s on an idle machine) |
+| `/v1/stats`, 32 threads, SQLite @ ~4k records | 10–15 req/s · p50 up to 2.6 s | **~8,500 req/s · p50 3.7 ms** | see below |
+
+The stats endpoint was the standout finding: `verify_chain()` ran O(N) on
+every call and `counts()`/pending-review listing re-scanned the whole store.
+Both are now incremental (O(1) counters + cached chain prefix, O(new-only)
+after appends), with an authoritative `force=True` re-walk kept for
+`/v1/audit/verify` and compliance exports. A bug in the first cut of the
+cached verify (forced mode still trusting the cached prefix, missing
+in-place tampering) was caught by the tamper regression tests and fixed —
+forced verification always walks from genesis.
+
 ## Improvement scope (ranked next steps)
 
 1. **Injection scan batching** — the remaining scan cost is linear in total
    customer text (~2 ms for a 200-turn chat). Pre-filtering messages with a
    cheap substring probe (first keyword word) before the regex would cut the
    200-turn case by roughly half. Estimated gain: 2× on long conversations.
-2. **Audit store** — in-memory `append` at ~20k ops/s and `verify_chain` at
-   O(N) are fine for review-queue workloads, but a write-behind buffer for
-   the SQLite backend (batched commits every N records or T ms) would lift
-   durable throughput 5–10×.
+2. **Audit store write-behind** — in-memory `append` at ~20k ops/s is fine,
+   but batching SQLite commits (every N records or T ms) would lift durable
+   mixed-traffic throughput beyond the current 689 req/s toward the memory
+   backend's numbers.
 3. **Risk engine allocation churn** — ~13k ops/s is dominated by Pydantic
    model construction (`RiskFactor`/`RiskResult`). Reusing frozen models or
    returning dataclasses internally would roughly double throughput.
-4. **HTTP overhead** — pipeline is ~0.4 ms of the ~1–2 ms per request that
-   HTTP + JSON add; per-brand policy caching at the API layer is the next
-   lever for end-to-end latency.
+4. **Multi-process scaling** — a single uvicorn worker is CPU-bound around
+   ~1–2.5k req/s; multiple workers now scale cleanly since all shared state
+   (counters, chain cache, review transitions) is either per-process or
+   guarded by conditional SQL updates.
 
 The pipeline sustains **≥2,000 evaluations/s per core even cold, and
 ~5,000–7,000/s warm** across all three decision paths — far above the
