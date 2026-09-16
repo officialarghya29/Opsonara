@@ -142,16 +142,20 @@ class _Pg:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
         """Run one statement on a pooled connection and commit.
 
-        The cursor is fully consumed before the connection returns to the
-        pool, so callers can safely ``fetchone()``/``fetchall()`` on the
-        returned cursor afterwards.
+        pg8000 leaves ``_row_iter = None`` for statements without a result
+        set (INSERT/UPDATE/DDL), and calling ``fetchall()`` on such a cursor
+        raises ``ProgrammingError("attempting to use unexecuted cursor")``.
+        ``cursor.description`` is ``None`` exactly when there is no result
+        set, so it is the reliable gate for fetching. Rows are materialized
+        before the connection returns to the pool.
         """
         with self._pool.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(sql.replace("?", "%s"), list(params))
-            rows = cursor.fetchall()
+            rows: list[Any] = list(cursor.fetchall()) if cursor.description is not None else []
+            rowcount = cursor.rowcount
             conn.commit()
-        return _CompletedCursor(rows, cursor.rowcount)
+        return _CompletedCursor(rows, rowcount)
 
     def close(self) -> None:
         self._pool.close_all()

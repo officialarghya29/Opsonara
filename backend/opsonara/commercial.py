@@ -192,6 +192,8 @@ class DecisionExplainer:
 
     def explain(self, audit: dict[str, Any]) -> dict[str, Any]:
         """Return a customer-safe explanation from an audit dict."""
+        if not isinstance(audit, dict):
+            audit = {}
         action = str(audit.get("action", "request"))
         friendly = self._FRIENDLY_ACTIONS.get(action, action)
         decision = str(audit.get("decision", ""))

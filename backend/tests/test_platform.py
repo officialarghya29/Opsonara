@@ -8,6 +8,7 @@ commercial layer (metering, billing, customer explainer).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -549,7 +550,6 @@ class TestIdentity:
         sig = hmac.new(
             b"sec", json.dumps(payload, sort_keys=True).encode(), hashlib.sha256
         ).digest()
-        import base64
 
         signature = base64.urlsafe_b64encode(sig).rstrip(b"=").decode()
         ok = verifier.verify(
@@ -565,6 +565,27 @@ class TestIdentity:
         registry = MandateRegistry()
         verdict = registry.verify({"scheme": "visa_ic"}, brand_id="brand_a")
         assert verdict.valid is False
+
+    def test_ap2_mandate_expiry_enforced(self) -> None:
+        """A signed-but-expired mandate must be rejected (not just tampered ones)."""
+        verifier = Ap2MandateVerifier(brand_secrets={"brand_a": "sec"})
+        expired = {"agent_id": "agt_1", "expires_at": int(time.time()) - 10}
+        expired_sig = base64.urlsafe_b64encode(
+            hmac.new(b"sec", json.dumps(expired, sort_keys=True).encode(), hashlib.sha256).digest()
+        ).rstrip(b"=").decode()
+        result = verifier.verify(
+            {"payload": expired, "signature": expired_sig}, brand_id="brand_a"
+        )
+        assert result["valid"] is False
+        assert "expired" in result["detail"]
+
+        live = {"agent_id": "agt_1", "expires_at": int(time.time()) + 600}
+        live_sig = base64.urlsafe_b64encode(
+            hmac.new(b"sec", json.dumps(live, sort_keys=True).encode(), hashlib.sha256).digest()
+        ).rstrip(b"=").decode()
+        ok = verifier.verify({"payload": live, "signature": live_sig}, brand_id="brand_a")
+        assert ok["valid"] is True
+        assert ok["agent_id"] == "agt_1"
 
     def test_strict_mode_blocks_missing_credential(self) -> None:
         from opsonara.stores.audit_store import AuditStore

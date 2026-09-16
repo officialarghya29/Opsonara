@@ -195,13 +195,18 @@ class Ap2MandateVerifier:
         signature = mandate.get("signature")
         if not payload or not signature:
             return {"valid": False, "detail": "mandate missing payload/signature"}
+        if not isinstance(payload, dict):
+            return {"valid": False, "detail": "mandate payload must be a JSON object"}
         expected = _b64url(
             hmac.new(secret.encode(), json.dumps(payload, sort_keys=True).encode(),
                      hashlib.sha256).digest()
         )
         if not hmac.compare_digest(expected, str(signature)):
             return {"valid": False, "detail": "mandate signature invalid"}
-        agent_id = str(payload.get("agent_id", "")) if isinstance(payload, dict) else ""
+        expires_at = payload.get("expires_at")
+        if isinstance(expires_at, (int, float)) and expires_at < time.time():
+            return {"valid": False, "detail": "mandate expired"}
+        agent_id = str(payload.get("agent_id", ""))
         return {"valid": True, "detail": "AP2 mandate verified", "agent_id": agent_id}
 
 
