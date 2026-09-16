@@ -15,15 +15,22 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from opsonara.commercial import DecisionExplainer, StripeBilling, UsageMeter
 from opsonara.config import settings
+from opsonara.connectors import ConnectorService
 from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
-from opsonara.firewall import FirewallEngine, FirewallRequest
+from opsonara.core.models import BrandPolicy
+from opsonara.firewall import AuthContext, FirewallEngine, FirewallRequest
+from opsonara.identity import Ap2MandateVerifier, CredentialAuthority, MandateRegistry
+from opsonara.learning import OutcomeStore, RecalibrationEngine
+from opsonara.multitenant import BrandRegistry, BrandTenant, build_auth_dependency, issue_api_key
+from opsonara.policy_store import PolicyPackStore
 from opsonara.stores import make_stores
 
 logger = logging.getLogger("opsonara.api")
@@ -72,9 +79,36 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     )
 
     audit_store, review_store = make_stores(
-        app_settings.store_backend, app_settings.db_path
+        app_settings.store_backend, app_settings.db_path, pg_dsn=app_settings.pg_dsn
     )
     firewall = FirewallEngine(audit_store=audit_store, review_store=review_store)
+
+    # -- multi-tenant gateway, policy packs, identity, learning, commercial -----
+    registry = BrandRegistry()
+    policy_packs = PolicyPackStore()
+    firewall.policy_packs = policy_packs
+    credential_authority = CredentialAuthority()
+    mandate_registry = MandateRegistry()
+    mandate_registry.register(Ap2MandateVerifier(brand_secrets={}))
+    firewall.credential_authority = credential_authority
+    firewall.mandate_registry = mandate_registry
+    firewall.credential_mode = app_settings.credential_verification
+    auth_dependency = build_auth_dependency(
+        registry,
+        auth_mode=app_settings.auth_mode,
+        signing_required=app_settings.auth_signing_required,
+        default_limit=app_settings.rate_limit_per_minute,
+    )
+    outcome_store = OutcomeStore()
+    recalibration = RecalibrationEngine(outcome_store)
+    connector_service = ConnectorService(firewall, review_store)
+    usage_meter = UsageMeter()
+    billing = StripeBilling(
+        usage_meter,
+        api_key=app_settings.stripe_api_key,
+        dry_run=app_settings.billing_dry_run,
+    )
+    explainer = DecisionExplainer()
 
     # Seed only an empty store: on sqlite this survives restarts without
     # duplicating demo rows; on memory it runs fresh each boot.
@@ -88,6 +122,14 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     app.state.audit_store = audit_store
     app.state.review_store = review_store
     app.state.firewall = firewall
+    app.state.brand_registry = registry
+    app.state.policy_packs = policy_packs
+    app.state.credential_authority = credential_authority
+    app.state.mandate_registry = mandate_registry
+    app.state.outcome_store = outcome_store
+    app.state.connector_service = connector_service
+    app.state.usage_meter = usage_meter
+    app.state.billing = billing
 
     @app.exception_handler(NotFoundError)
     async def _not_found(_: Any, exc: NotFoundError) -> JSONResponse:
@@ -127,7 +169,10 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.post("/v1/evaluate", tags=["firewall"])
-    async def evaluate(request: FirewallRequest) -> dict[str, Any]:
+    async def evaluate(
+        request: FirewallRequest,
+        brand: Any = Depends(auth_dependency),  # noqa: B008 — FastAPI idiom
+    ) -> dict[str, Any]:
         """Evaluate a proposed agent action through the full pipeline.
 
         Inconsistent context (e.g. action.customer_id not matching the
@@ -135,9 +180,10 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         the context engine is surfaced as HTTP 422 — never a 500.
         """
         try:
-            result = firewall.evaluate(request)
+            result = firewall.evaluate(request, auth=AuthContext(brand_id=brand.brand_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        usage_meter.record(brand.brand_id, "/v1/evaluate", result.decision.value)
         return result.model_dump(mode="json")
 
     # ------------------------------------------------------------------
@@ -194,8 +240,19 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         review_id: str,
         body: ReviewDecisionRequest,
     ) -> dict[str, Any]:
-        item, _human_record, human_audit_id = review_store.decide(
+        item, human_record, human_audit_id = review_store.decide(
             review_id, approved=body.approved, reviewer=body.reviewer.strip()
+        )
+        # Learning loop: pair the human verdict with the original signals so
+        # per-brand recalibration can learn from real outcomes.
+        origin = audit_store.get(item.audit_id)
+        outcome_store.record(
+            audit_id=item.audit_id,
+            brand_id=origin.record.brand_id or "default",
+            review_id=review_id,
+            approved=body.approved,
+            risk_score=str(origin.record.risk_score),
+            signals={f.name: str(f.score) for f in origin.record.risk_factors},
         )
         return {
             "review": item.to_dict(),
@@ -219,6 +276,196 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
             "pending_reviews": review_store.count_pending(),
             "audit_chain_intact": audit_store.verify_chain(),
         }
+
+    # ------------------------------------------------------------------
+    # multi-tenant gateway administration
+    # ------------------------------------------------------------------
+
+    @app.post("/v1/brands", tags=["gateway"])
+    async def create_brand(
+        name: str,
+        signing_secret: str | None = None,
+        rate_limit_per_minute: int | None = None,
+    ) -> dict[str, Any]:
+        """Register a brand tenant; returns the API key exactly once."""
+        raw_key, prefix = issue_api_key()
+        tenant = BrandTenant(
+            brand_id=f"brand_{prefix[:8]}",
+            name=name,
+            signing_secret=signing_secret,
+            rate_limit_per_minute=rate_limit_per_minute,
+        )
+        from opsonara.multitenant import register_key
+
+        register_key(tenant, raw_key)
+        registry.upsert(tenant)
+        return {"brand_id": tenant.brand_id, "name": name, "api_key": raw_key, "prefix": prefix}
+
+    @app.get("/v1/brands", tags=["gateway"])
+    async def list_brands() -> dict[str, Any]:
+        return {
+            "brands": [
+                {
+                    "brand_id": t.brand_id,
+                    "name": t.name,
+                    "keys": len(t.key_hashes),
+                    "signing": t.signing_secret is not None,
+                    "rate_limit": t.rate_limit_per_minute,
+                }
+                for t in registry.all()
+                if t.brand_id != "public"
+            ]
+        }
+
+    # ------------------------------------------------------------------
+    # policy packs (multi-tenant rules-as-data)
+    # ------------------------------------------------------------------
+
+    @app.post("/v1/policy-packs", tags=["policy-packs"])
+    async def create_policy_pack(
+        brand_id: str,
+        policy: BrandPolicy,
+        created_by: str = "api",
+    ) -> dict[str, Any]:
+        pack = policy_packs.create(brand_id, policy, created_by=created_by)
+        return {"pack_id": pack.pack_id, "version": pack.version, "state": pack.state}
+
+    @app.get("/v1/policy-packs", tags=["policy-packs"])
+    async def list_policy_packs(brand_id: str | None = None) -> dict[str, Any]:
+        return {
+            "packs": [
+                {
+                    "pack_id": p.pack_id,
+                    "brand_id": p.brand_id,
+                    "version": p.version,
+                    "state": p.state,
+                    "created_at": p.created_at.isoformat(),
+                    "created_by": p.created_by,
+                }
+                for p in policy_packs.list(brand_id)
+            ]
+        }
+
+    @app.post("/v1/policy-packs/{pack_id}/activate", tags=["policy-packs"])
+    async def activate_policy_pack(pack_id: str) -> dict[str, Any]:
+        try:
+            pack = policy_packs.activate(pack_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"pack_id": pack.pack_id, "state": pack.state}
+
+    # ------------------------------------------------------------------
+    # agent identity: credentials & mandates
+    # ------------------------------------------------------------------
+
+    @app.post("/v1/credentials", tags=["identity"])
+    async def issue_credential(
+        agent_id: str,
+        brand_id: str,
+        permission_level: int = 1,
+        ttl_seconds: int = 3600,
+    ) -> dict[str, Any]:
+        token, cred = credential_authority.issue(
+            agent_id, brand_id, permission_level, ttl_seconds=ttl_seconds
+        )
+        return {"token": token, "expires_at": cred.expires_at, "agent_id": agent_id}
+
+    @app.post("/v1/credentials/{agent_id}/revoke", tags=["identity"])
+    async def revoke_credential(agent_id: str) -> dict[str, Any]:
+        credential_authority.revoke(agent_id)
+        return {"agent_id": agent_id, "revoked": True}
+
+    @app.get("/v1/mandates/schemes", tags=["identity"])
+    async def mandate_schemes() -> dict[str, Any]:
+        return {"schemes": mandate_registry.schemes()}
+
+    # ------------------------------------------------------------------
+    # connectors (Shopify / WooCommerce / generic webhook)
+    # ------------------------------------------------------------------
+
+    @app.get("/v1/connectors", tags=["connectors"])
+    async def list_connectors() -> dict[str, Any]:
+        return {"connectors": connector_service.list()}
+
+    @app.post("/v1/connectors/{connector_id}/process", tags=["connectors"])
+    async def process_connector(connector_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate via the connector's firewall, then execute/hold/refuse."""
+        try:
+            return connector_service.process(connector_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # learning loop
+    # ------------------------------------------------------------------
+
+    @app.post("/v1/learning/recalibrate", tags=["learning"])
+    async def recalibrate(brand_id: str, min_outcomes: int = 10) -> dict[str, Any]:
+        new_set, info = recalibration.recalibrate(brand_id, min_outcomes=min_outcomes)
+        if new_set is None:
+            return info
+        return {**info, "weights": {k: str(v) for k, v in new_set.weights.items()}}
+
+    @app.get("/v1/learning/weights", tags=["learning"])
+    async def learning_weights(brand_id: str) -> dict[str, Any]:
+        ws = outcome_store.weights_for(brand_id)
+        return {
+            "brand_id": brand_id,
+            "version": ws.version,
+            "state": ws.state,
+            "weights": {k: str(v) for k, v in ws.weights.items()},
+        }
+
+    @app.post("/v1/learning/shadow", tags=["learning"])
+    async def start_shadow(brand_id: str, weights: dict[str, str]) -> dict[str, Any]:
+        from decimal import Decimal
+
+        shadow = outcome_store.start_shadow(
+            brand_id, {k: Decimal(v) for k, v in weights.items()}
+        )
+        return {"brand_id": brand_id, "state": shadow.state}
+
+    @app.get("/v1/learning/shadow/status", tags=["learning"])
+    async def shadow_status(brand_id: str) -> dict[str, Any]:
+        shadow = outcome_store.shadow_for(brand_id)
+        if shadow is None:
+            return {"brand_id": brand_id, "state": "none"}
+        return {
+            "brand_id": brand_id,
+            "state": shadow.state,
+            "samples": shadow.shadow_hits,
+            "agreements": shadow.shadow_agrees,
+            "promotable": outcome_store.shadow_promotable(
+                brand_id,
+                min_samples=app_settings.shadow_min_samples,
+                min_win_rate=app_settings.shadow_min_win_rate,
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # metering, billing & customer explainer
+    # ------------------------------------------------------------------
+
+    @app.get("/v1/usage", tags=["commercial"])
+    async def usage(brand_id: str | None = None) -> dict[str, Any]:
+        return usage_meter.usage(brand_id=brand_id)
+
+    @app.get("/v1/billing/preview", tags=["commercial"])
+    async def billing_preview(brand_id: str) -> dict[str, Any]:
+        return billing.invoice_preview(brand_id)
+
+    @app.post("/v1/billing/report", tags=["commercial"])
+    async def billing_report(brand_id: str) -> dict[str, Any]:
+        return billing.report_period(brand_id)
+
+    @app.post("/v1/explain", tags=["commercial"])
+    async def explain_decision(audit_id: str) -> dict[str, Any]:
+        """Customer-safe explanation of a decision (no internal details)."""
+        try:
+            stored = audit_store.get(audit_id)
+        except NotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return explainer.explain(stored.record.to_audit_dict())
 
     # ------------------------------------------------------------------
     # console UI (served from /app so it never shadows API docs)

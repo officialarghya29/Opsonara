@@ -1,0 +1,4 @@
+# Optional backend dependencies — install only what you deploy with.
+#
+#   Postgres store backend (OPSONARA_STORE_BACKEND=postgres):
+pg8000>=1.31,<2.0

@@ -13,7 +13,7 @@
   <a href="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml"><img src="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-5e7aff" alt="python" />
   <img src="https://img.shields.io/badge/fastapi-0.115%2B-22d3ee" alt="fastapi" />
-  <img src="https://img.shields.io/badge/tests-137%20passed-34d399" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-176%20passed-34d399" alt="tests" />
   <img src="https://img.shields.io/badge/mypy-strict%20clean-5e7aff" alt="mypy" />
   <img src="https://img.shields.io/badge/license-MIT-93a1bd" alt="license" />
 </p>
@@ -278,7 +278,51 @@ curl -X POST http://localhost:8000/v1/evaluate \
 | `GET` | `/v1/stats` | Dashboard metrics |
 | `GET` | `/health` | Liveness probe |
 
+### Multi-tenant platform API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/v1/brands` | Register a brand tenant — returns its API key **once** |
+| `GET` | `/v1/brands` | List tenants (keys, signing, rate limits) |
+| `POST`/`GET` | `/v1/policy-packs` | Versioned brand policy packs (rules-as-data) |
+| `POST` | `/v1/policy-packs/{id}/activate` | Promote a pack version to active |
+| `POST` | `/v1/credentials` | Issue a signed agent credential (HS256 JWT) |
+| `POST` | `/v1/credentials/{agent}/revoke` | Revoke an agent's credential |
+| `GET` | `/v1/mandates/schemes` | Registered commerce-mandate verifiers (AP2 …) |
+| `GET` | `/v1/connectors` | Registered platform connectors (Shopify / Woo / webhook) |
+| `POST` | `/v1/connectors/{id}/process` | Evaluate + execute/hold/refuse on the platform |
+| `POST` | `/v1/learning/recalibrate` | Recalibrate per-brand risk weights from human outcomes |
+| `GET` | `/v1/learning/weights` | Current weight set for a brand |
+| `POST`/`GET` | `/v1/learning/shadow` | A/B shadow a candidate weight set before promotion |
+| `GET` | `/v1/usage` | Usage metering (per brand, per decision) |
+| `GET`/`POST` | `/v1/billing/…` | Invoice preview + Stripe meter-event reporting |
+| `POST` | `/v1/explain?audit_id=` | Customer-safe decision explainer (no internals) |
+
 All monetary amounts are **`Decimal`-safe**: send strings or ints (floats are rejected with HTTP 422 so no drift ever enters policy comparisons or the audit trail).
+
+## Platform capabilities (multi-tenant SaaS layer)
+
+Layered on the core five-stage pipeline without changing it:
+
+| Capability | Module | What it gives you |
+|---|---|---|
+| **Per-brand API keys + HMAC signing** | `multitenant.py` | Tenants registered at runtime; keys stored hashed; replay-protected request signing; sliding-window rate limits per key; agent allow-lists |
+| **Policy packs (rules-as-data)** | `policy_store.py` | Versioned per-brand policy sets; the active pack overrides request policies at evaluate time |
+| **Signed agent credentials** | `identity.py` | HS256 JWT per agent/brand replaces trust-me integer levels; expiry, revocation, brand pinning; full provenance block in every audit record |
+| **Commerce mandates** | `identity.py` | Pluggable AP2/Visa-IC/Mastercard-style mandate verification; falls back to the internal permission model |
+| **Learning loop** | `learning.py` | Human review outcomes pair with decision signals → bounded per-brand weight recalibration (±0.10 clamp, renormalized) → A/B shadow testing before promotion — every weight change is itself auditable |
+| **Platform connectors** | `connectors.py` | Shopify + WooCommerce + generic webhook: ALLOW executes on the platform, REVIEW holds, BLOCK refuses |
+| **Metering & billing** | `commercial.py` | Per-brand usage events, invoice previews, Stripe meter-event reporting (dry-run by default) |
+| **Customer explainer** | `commercial.py` | Stripped-down, non-internal decision explanation for the brand's support flow |
+| **Postgres backend** | `stores/pg_store.py` | Horizontal-scale audit + reviews; same hash-chain guarantees, conditional-UPDATE review decisions, O(1) counters |
+
+```python
+# The learning loop in one pass:
+#   REVIEW decision → human verdict → outcome log
+#   → per-brand recalibration (bounded, explainable)
+#   → shadow A/B (N samples, ≥ win-rate) → promotion
+#   → new weights feed the Risk Engine; the change lands in the audit trail
+```
 
 ## Console UI
 
@@ -295,11 +339,20 @@ The dashboard ships with the API at **`/app/`** — dark, futuristic, operator-f
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPSONARA_STORE_BACKEND` | `memory` | `memory` or `sqlite` (persists audit + reviews) |
+| `OPSONARA_STORE_BACKEND` | `memory` | `memory`, `sqlite` (persists), or `postgres` (multi-instance) |
 | `OPSONARA_DB_PATH` | `opsonara.db` | SQLite file when the sqlite backend is enabled |
+| `OPSONARA_PG_DSN` | — | Postgres DSN when the postgres backend is enabled |
 | `OPSONARA_SEED_DEMO_DATA` | `true` | Seed demo transactions on boot |
 | `OPSONARA_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `OPSONARA_CORS_ORIGINS` | `*` | Comma-separated allowed origins |
+| `OPSONARA_AUTH_MODE` | `off` | `off` (dev) or `api_key` (per-brand keys + optional HMAC signing) |
+| `OPSONARA_AUTH_SIGNING_REQUIRED` | `false` | Reject unsigned requests even for tenants without a secret |
+| `OPSONARA_RATE_LIMIT_PER_MINUTE` | `120` | Default per-key request budget (0 = unlimited) |
+| `OPSONARA_CREDENTIAL_VERIFICATION` | `optional` | `off` / `optional` / `strict` signed agent credentials |
+| `OPSONARA_SHADOW_MIN_SAMPLES` | `50` | Shadow samples before a weight set may be promoted |
+| `OPSONARA_SHADOW_MIN_WIN_RATE` | `0.55` | Shadow agreement threshold for promotion |
+| `OPSONARA_STRIPE_API_KEY` | — | When set, billing reports to Stripe meter events |
+| `OPSONARA_BILLING_DRY_RUN` | `true` | Plan Stripe calls without sending (safe default) |
 
 ## Project structure
 
@@ -309,13 +362,19 @@ opsonara/
 │   ├── opsonara/
 │   │   ├── core/           # domain models, injection detector, exceptions, ids
 │   │   ├── engines/        # context → policy → risk → decision
-│   │   ├── stores/         # audit log + review queue (memory & sqlite backends)
+│   │   ├── stores/         # audit log + review queue (memory · sqlite · postgres)
 │   │   ├── firewall.py     # five-stage pipeline orchestrator
+│   │   ├── multitenant.py  # API keys, HMAC signing, rate limiting
+│   │   ├── policy_store.py # versioned per-brand policy packs
+│   │   ├── identity.py     # agent credentials + commerce mandates (AP2)
+│   │   ├── learning.py     # outcome logging, recalibration, shadow A/B
+│   │   ├── connectors.py   # Shopify / WooCommerce / webhook executors
+│   │   ├── commercial.py   # usage metering, Stripe billing, explainer
 │   │   ├── config.py       # env-driven settings
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 137 unit + integration tests (~97% coverage)
+│   ├── tests/              # 181 unit + integration tests (memory · sqlite · postgres)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -335,14 +394,14 @@ opsonara/
 | Deterministic security | injection escalation is rule-based, never probabilistic; inputs are Unicode-normalized (NFKC) and stripped of zero-width characters, so homoglyph/zero-width evasion fails; conversation roles are a strict contract |
 | Human-in-the-loop | REVIEW decisions queue for a human; the outcome is appended to the same audit trail |
 | Safe concurrency | thread-safe stores with lock-protected mutation |
-| Verified | 137 tests (~97% coverage) · strict mypy clean · ruff clean · pip-audit clean · CI on every push · non-root container with healthcheck |
+| Verified | 181 tests · strict mypy clean · ruff clean · pip-audit clean · CI + Postgres job on every push · non-root container with healthcheck |
 
 ## Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                # 137 passed (~97% coverage)
+pytest                # 176 passed + 5 postgres integration (CI)
 mypy opsonara         # no issues in 20 source files
 mypy --disallow-untyped-defs opsonara   # strict mode also clean
 ruff check .          # all checks passed

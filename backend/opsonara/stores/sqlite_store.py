@@ -440,16 +440,22 @@ class SqliteReviewStore:
 
 
 def make_stores(
-    backend: str, db_path: str
+    backend: str, db_path: str, *, pg_dsn: str = ""
 ) -> tuple[AuditStoreProtocol, ReviewStoreProtocol]:
-    """Factory honoring ``OPSONARA_STORE_BACKEND`` (memory | sqlite).
+    """Factory honoring ``OPSONARA_STORE_BACKEND`` (memory | sqlite | postgres).
 
-    Returns ``(audit_store, review_store)``; both share the SQLite database
-    when the backend is ``sqlite``.
+    Returns ``(audit_store, review_store)``; both share the same database
+    for the sqlite/postgres backends.
     """
     if backend == "sqlite":
         audit_store = SqliteAuditStore(db_path)
         return audit_store, SqliteReviewStore(db_path, audit_store)
+    if backend == "postgres":
+        if not pg_dsn:
+            raise ValueError("OPSONARA_PG_DSN is required when store_backend is 'postgres'")
+        from opsonara.stores.pg_store import make_pg_stores
+
+        return make_pg_stores(pg_dsn)
     if backend == "memory":
         from opsonara.stores.audit_store import AuditStore
         from opsonara.stores.review_store import ReviewStore
@@ -457,7 +463,7 @@ def make_stores(
         memory_audit_store = AuditStore()
         return memory_audit_store, ReviewStore(memory_audit_store)
     raise ValueError(
-        f"unknown store backend {backend!r}; expected 'memory' or 'sqlite'"
+        f"unknown store backend {backend!r}; expected 'memory', 'sqlite' or 'postgres'"
     )
 
 

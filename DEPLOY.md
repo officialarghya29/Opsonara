@@ -34,11 +34,17 @@ Tags: `latest` (main), `sha-<commit>`, and `vX.Y.Z` for release tags.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPSONARA_STORE_BACKEND` | `memory` | `sqlite` persists audit + reviews across restarts |
+| `OPSONARA_STORE_BACKEND` | `memory` | `sqlite` (single node) or `postgres` (multi-instance) for production |
 | `OPSONARA_DB_PATH` | `opsonara.db` | SQLite file (mount a volume in production) |
+| `OPSONARA_PG_DSN` | — | `postgresql://user:pass@host:5432/db` when backend is `postgres` |
 | `OPSONARA_SEED_DEMO_DATA` | `true` | Set `false` in production |
 | `OPSONARA_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
 | `OPSONARA_CORS_ORIGINS` | `*` | Comma-separated origins for browser clients |
+| `OPSONARA_AUTH_MODE` | `off` | Set `api_key` in production — per-brand keys, optional HMAC signing |
+| `OPSONARA_RATE_LIMIT_PER_MINUTE` | `120` | Per-key budget for protected endpoints |
+| `OPSONARA_CREDENTIAL_VERIFICATION` | `optional` | `strict` requires valid signed agent credentials |
+| `OPSONARA_STRIPE_API_KEY` | — | Enable Stripe meter-event reporting |
+| `OPSONARA_BILLING_DRY_RUN` | `true` | Keep `true` until Stripe is verified |
 
 > **Important:** with the default `memory` backend the audit trail lives only
 > for the process lifetime. In production always use
@@ -48,7 +54,10 @@ Tags: `latest` (main), `sha-<commit>`, and `vX.Y.Z` for release tags.
 ## 4 · Production checklist
 
 - [ ] `OPSONARA_SEED_DEMO_DATA=false`
-- [ ] `OPSONARA_STORE_BACKEND=sqlite` + mounted volume for `OPSONARA_DB_PATH`
+- [ ] `OPSONARA_STORE_BACKEND=postgres` (multi-instance) or `sqlite` + mounted volume (single node)
+- [ ] `OPSONARA_AUTH_MODE=api_key` — register each brand via `POST /v1/brands` and
+      distribute keys over a secret channel; enable per-tenant signing secrets
+      and set `OPSONARA_RATE_LIMIT_PER_MINUTE` to your budget
 - [ ] `OPSONARA_CORS_ORIGINS` pinned to your console origin(s)
 - [ ] TLS termination in front (nginx/Caddy/ALB); the app is plain HTTP
 - [ ] Reverse proxy example:
@@ -75,8 +84,9 @@ server {
 
 ## 5 · Scaling
 
-The app is stateless except for the SQLite file. For multi-instance
-deployments, run one writer instance against the volume, or wire the same
-store interfaces to Postgres (the interfaces in
-`backend/opsonara/stores/audit_store.py` are the contract — see the roadmap
-in the README).
+The app is stateless except for its stores. For multi-instance deployments
+run with `OPSONARA_STORE_BACKEND=postgres` and `pip install pg8000` (or the
+`requirements-pg.txt` extra) — every worker then shares the audit chain and
+review queue, review decisions use conditional updates so two workers can
+never both resolve one review, and the hash chain stays verifiable across
+instances.

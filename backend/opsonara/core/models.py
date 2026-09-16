@@ -321,6 +321,8 @@ class AuditRecord(BaseModel):
     customer_id: str | None = None
     order_id: str | None = None
     agent_id: str
+    brand_id: str | None = None
+    """Tenant this decision belongs to (None in single-tenant/dev mode)."""
     customer_risk: Decimal
     injection_risk: Decimal
     risk_score: Decimal = Field(default=Decimal("0"))
@@ -334,17 +336,20 @@ class AuditRecord(BaseModel):
     risk_factors: list[RiskFactor]
     review_id: str | None = None
     human_decision: str | None = None
+    provenance: dict[str, Any] | None = None
+    """Agent-identity provenance: credential, framework, mandate verdict."""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def to_audit_dict(self) -> dict[str, Any]:
         """Flat JSON-safe dict, mirroring the shape shown in the product spec."""
-        return {
+        out: dict[str, Any] = {
             "action": self.action,
             "amount": str(self.amount),
             "currency": self.currency,
             "customer_id": self.customer_id,
             "order_id": self.order_id,
             "agent_id": self.agent_id,
+            "brand_id": self.brand_id,
             "customer_risk": float(self.customer_risk),
             "injection_risk": float(self.injection_risk),
             "risk_score": float(self.risk_score),
@@ -359,6 +364,9 @@ class AuditRecord(BaseModel):
             "human_decision": self.human_decision,
             "timestamp": self.timestamp.isoformat(),
         }
+        if self.provenance is not None:
+            out["provenance"] = self.provenance
+        return out
 
     def fingerprint(self) -> str:
         """Stable SHA-256 over the decision content (chain-hash seed).
