@@ -57,7 +57,9 @@ load in every scenario.
 |---|---|---|---|
 | `/v1/evaluate` mixed traffic, 32 threads, SQLite | 394 req/s · p50 82 ms | **689 req/s · p50 46 ms** | `synchronous=NORMAL` under WAL |
 | `/v1/evaluate` mixed traffic, 32 threads, memory | — | **1,158 req/s · p50 24 ms** | (2,458 req/s on an idle machine) |
+| `/v1/evaluate` mixed traffic, 32 threads, **Postgres 16** | — | **218 req/s · p50 143 ms** | per-request commit durability; see below |
 | `/v1/stats`, 32 threads, SQLite @ ~4k records | 10–15 req/s · p50 up to 2.6 s | **~8,500 req/s · p50 3.7 ms** | see below |
+| `/v1/stats`, 32 threads, **Postgres 16** @ ~5k records | — | **310 req/s · p50 97 ms** | O(1) counters + `count_pending()` |
 
 The stats endpoint was the standout finding: `verify_chain()` ran O(N) on
 every call and `counts()`/pending-review listing re-scanned the whole store.
@@ -67,6 +69,17 @@ after appends), with an authoritative `force=True` re-walk kept for
 cached verify (forced mode still trusting the cached prefix, missing
 in-place tampering) was caught by the tamper regression tests and fixed —
 forced verification always walks from genesis.
+
+### Postgres 16 notes
+
+The Postgres backend was verified against a real server (portable binaries,
+no root): 480 appends across 12 threads → exact O(1) counters, intact hash
+chain, and a 16-thread review-decide race with exactly one winner and 15
+clean `AlreadyResolvedError` losses. Its lower HTTP numbers vs SQLite are
+the price of multi-instance safety — every write commits durably before the
+response. Throughput roughly doubles with `synchronous_commit = off`
+(accepted risk: lose the last ~ms of commits on an OS crash; the chain is
+re-derivable from `verify_chain(force=True)`).
 
 ## Improvement scope (ranked next steps)
 

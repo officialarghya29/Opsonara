@@ -300,6 +300,28 @@ curl -X POST http://localhost:8000/v1/evaluate \
 | `POST` | `/v1/webhooks/shopify` | Inbound Shopify webhook (HMAC-verified, then evaluated) |
 | `POST` | `/v1/webhooks/generic` | Inbound generic webhook (HMAC + replay protection) |
 
+#### Customer-facing explainer (`POST /v1/explain?audit_id=…`)
+
+When a customer asks *"where is my refund?"*, the brand's support flow can call
+the explainer with the audit ID and show the response **as-is** — it is filtered
+so internal identifiers, policy-pack names, credential details and engine
+jargon never reach the customer:
+
+```jsonc
+// GET the audit ID from the evaluate response, then:
+POST /v1/explain?audit_id=aud_000042_ca5c1b59
+{
+  "headline": "Your refund request for INR 18999 needs a quick human review.",
+  "status": "in_review",
+  "reasons": ["High-value refund", "Possible instruction manipulation"],
+  "next_step": "A specialist will look at this shortly — no action needed from you."
+}
+```
+
+`status` is one of `approved` / `in_review` / `declined` / `processing`.
+Internal-only reasons (anything containing policy-pack or credential hints) are
+dropped automatically; at most three human-readable reasons are returned.
+
 All monetary amounts are **`Decimal`-safe**: send strings or ints (floats are rejected with HTTP 422 so no drift ever enters policy comparisons or the audit trail).
 
 ## Platform capabilities (multi-tenant SaaS layer)
@@ -382,7 +404,7 @@ opsonara/
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
-├── docs/                   # logo, screenshot, BENCHMARKS.md
+├── docs/                   # logo, screenshot, BENCHMARKS.md, ROADMAP.md
 ├── .github/workflows/      # ci.yml (test+lint+types) · publish.yml (GHCR image)
 ├── Dockerfile · docker-compose.yml · DEPLOY.md
 └── LICENSE
@@ -416,7 +438,7 @@ CI runs the full matrix (pytest + mypy + ruff) on Python 3.11 and 3.12 for every
 
 ## Performance
 
-The pipeline sustains **~2,100–2,500 evaluations/s per core cold (≈0.4 ms each) and ~5,000–7,000/s warm** across all three decision paths. Under concurrent HTTP load (real uvicorn server, threaded clients, chain integrity asserted after every run): mixed evaluate traffic reaches **~1,160 req/s (memory) / ~690 req/s (SQLite)** at 32 threads with zero errors, and the `/v1/stats` endpoint serves a populated store at **~8,500 req/s** after its hot path was made O(1). Full numbers, methodology, and the ranked improvement roadmap live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The pipeline sustains **~2,100–2,500 evaluations/s per core cold (≈0.4 ms each) and ~5,000–7,000/s warm** across all three decision paths. Under concurrent HTTP load (real uvicorn server, threaded clients, chain integrity asserted after every run): mixed evaluate traffic reaches **~1,160 req/s (memory) / ~690 req/s (SQLite) / ~220 req/s (Postgres 16, durable commits)** at 32 threads with zero errors, and the `/v1/stats` endpoint serves a populated store at **~8,500 req/s** after its hot path was made O(1). Full numbers, methodology, and the ranked improvement roadmap live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); the product-spec coverage map (what ships today vs. what's next) is [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Roadmap
 

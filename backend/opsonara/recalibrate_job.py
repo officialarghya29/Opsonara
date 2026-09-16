@@ -23,7 +23,7 @@ from typing import Any
 
 from opsonara.config import settings
 from opsonara.core.models import AuditRecord, Decision, RiskBand
-from opsonara.learning import OutcomeStore, RecalibrationEngine
+from opsonara.learning import RecalibrationEngine, open_outcome_store
 from opsonara.stores import make_stores
 
 logger = logging.getLogger("opsonara.recalibrate_job")
@@ -74,8 +74,10 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=settings.log_level, format="%(levelname)s %(name)s: %(message)s")
 
-    audit_store, _review_store = make_stores(settings.store_backend, settings.db_path)
-    outcome_store = OutcomeStore()
+    audit_store, _review_store = make_stores(
+        settings.store_backend, settings.db_path, pg_dsn=settings.pg_dsn
+    )
+    outcome_store = open_outcome_store()
     engine = RecalibrationEngine(outcome_store)
 
     brands = (

@@ -32,7 +32,7 @@ from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
 from opsonara.core.models import BrandPolicy
 from opsonara.firewall import AuthContext, FirewallEngine, FirewallRequest
 from opsonara.identity import Ap2MandateVerifier, CredentialAuthority, MandateRegistry
-from opsonara.learning import OutcomeStore, RecalibrationEngine
+from opsonara.learning import RecalibrationEngine, open_outcome_store
 from opsonara.multitenant import (
     BrandRegistry,
     BrandTenant,
@@ -168,7 +168,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         require_admin=True,
         bootstrap_admin_token=operator_token,
     )
-    outcome_store = OutcomeStore()
+    outcome_store = open_outcome_store()
     recalibration = RecalibrationEngine(outcome_store)
     connector_service = ConnectorService(firewall, review_store)
     webhook_secrets: dict[str, str] = {}

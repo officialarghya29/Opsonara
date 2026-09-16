@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     """'off' | 'optional' (verify when presented) | 'strict' (valid JWT credential required)."""
 
     # -- learning loop -------------------------------------------------------------
+    outcome_store_path: str = ""
+    """JSON file for the shared outcome store (OPSONARA_OUTCOME_STORE_PATH),
+    e.g. /data/outcomes.json on a mounted volume. Set it so the API process
+    and the weekly recalibration cron see the same outcome log; empty keeps
+    the per-process in-memory store (dev/demo)."""
     shadow_min_samples: int = 50
     """Minimum shadow samples before a candidate weight set may be promoted."""
     shadow_min_win_rate: float = 0.55
