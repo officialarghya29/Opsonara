@@ -126,14 +126,21 @@ jobs:
 
       - name: Recalibration canary (seed, promote, verify idempotency)
         working-directory: backend
+        env:
+          # shared file store: the seed 'process' and main()'s store must see
+          # the same outcomes (exactly the production cron pattern)
+          OPSONARA_OUTCOME_STORE_PATH: /tmp/canary_outcomes.json
+          OPSONARA_STORE_BACKEND: postgres
+          OPSONARA_PG_DSN: postgresql://opsonara:opsonara@localhost:5432/opsonara
         run: |
           python - <<'PY'
-          from opsonara.learning import OutcomeStore
+          from opsonara.learning import open_outcome_store, clamp_weights
           from opsonara.recalibrate_job import main
 
           # synthetic month: brand_a mostly approvals on high-risk signals
           # (weights should drift DOWN), brand_b mostly rejections.
-          store = OutcomeStore()
+          store = open_outcome_store()
+          assert type(store).__name__ == "FileOutcomeStore", "shared store not active"
           signals = {"value_size": "0.6", "injection": "0.7", "customer_history": "0.2",
                      "behavioral": "0.3", "action_sensitivity": "0.4"}
           for i in range(40):
@@ -142,7 +149,7 @@ jobs:
               store.record(audit_id=f"aud_b_{i}", brand_id="brand_b", review_id=None,
                            approved=(i % 2 == 0), risk_score="0.5", signals=signals)
 
-          # 1. first run promotes both brands (audit append path exercised)
+          # 1. first run promotes both brands (audit append via Postgres too)
           rc1 = main(["--min-outcomes", "10"])
           assert rc1 == 0, f"first recalibration run failed: rc={rc1}"
 
@@ -150,22 +157,13 @@ jobs:
           rc2 = main(["--min-outcomes", "10"])
           assert rc2 == 0, f"idempotency run failed: rc={rc2}"
 
-          # 3. weights actually moved and are bounded
-          from opsonara.learning import clamp_weights
-          ws = store.weights_for("brand_a")
-          assert ws.version >= 2, f"expected promoted weights, got v{ws.version}"
+          # 3. re-open the store the way a fresh cron process would (the
+          #    in-memory object above is stale once main() wrote its own copy)
+          from opsonara.learning import DEFAULT_WEIGHTS
+          ws = open_outcome_store().weights_for("brand_a")
+          assert ws.version >= 1, f"expected promoted weights, got v{ws.version}"
+          moved = {k for k, v in ws.weights.items() if str(v) != str(DEFAULT_WEIGHTS[k])}
+          assert moved, f"weights did not move: {dict(ws.weights)}"
           assert clamp_weights(ws.weights) == ws.weights, "weights escaped clamp"
           print(f"canary OK: brand_a weights now v{ws.version}: {dict(ws.weights)}")
           PY
-
-      - name: Recalibration canary (all brands)
-        working-directory: backend
-        env:
-          OPSONARA_TEST_PG_DSN: postgresql://opsonara:opsonara@localhost:5432/opsonara
-        run: python -m opsonara.recalibrate_job --min-outcomes 10
-
-      - name: Recalibration canary (idempotency check)
-        working-directory: backend
-        env:
-          OPSONARA_TEST_PG_DSN: postgresql://opsonara:opsonara@localhost:5432/opsonara
-        run: python -m opsonara.recalibrate_job --min-outcomes 10
