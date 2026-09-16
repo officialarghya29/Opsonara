@@ -122,6 +122,44 @@
       <div id="reviews"></div>
     </section>
 
+    <!-- ===================== policy packs (authoring) ===================== -->
+    <section class="panel">
+      <h2><span class="dot"></span> Policy packs — per-brand rules as data</h2>
+      <div class="field-grid">
+        <div class="field">
+          <label>Brand ID</label>
+          <input id="pp-brand" value="brand_demo" />
+        </div>
+        <div class="field">
+          <label>Auto-approve up to</label>
+          <input id="pp-auto" value="2000" inputmode="decimal" />
+        </div>
+        <div class="field">
+          <label>Human review up to</label>
+          <input id="pp-review" value="10000" inputmode="decimal" />
+        </div>
+        <div class="field">
+          <label>Block above</label>
+          <input id="pp-block" value="25000" inputmode="decimal" />
+        </div>
+      </div>
+      <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap">
+        <button class="btn btn-primary" id="btn-pp-create">＋ Create / version pack</button>
+        <button class="btn btn-ghost" id="btn-pp-refresh">↻ Refresh packs</button>
+      </div>
+      <div style="overflow-x:auto; margin-top:12px">
+        <table>
+          <thead>
+            <tr>
+              <th>Pack</th><th>Brand</th><th class="mono">Ver</th><th>State</th>
+              <th>Auto ≤</th><th>Review ≤</th><th>Block &gt;</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="pp-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ===================== audit trail ===================== -->
     <section class="panel">
       <h2><span class="dot"></span> Audit trail — every decision, explained</h2>

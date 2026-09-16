@@ -59,6 +59,10 @@ Tags: `latest` (main), `sha-<commit>`, and `vX.Y.Z` for release tags.
       distribute keys over a secret channel; enable per-tenant signing secrets
       and set `OPSONARA_RATE_LIMIT_PER_MINUTE` to your budget
 - [ ] `OPSONARA_CORS_ORIGINS` pinned to your console origin(s)
+- [ ] `OPSONARA_ADMIN_TOKEN` set to a long random value — operator endpoints
+      (create brands, issue credentials, recalibrate) reject everyone else
+- [ ] `OPSONARA_WEBHOOK_SECRETS` configured before exposing
+      `/v1/webhooks/*` — unsigned webhooks are rejected with 401
 - [ ] TLS termination in front (nginx/Caddy/ALB); the app is plain HTTP
 - [ ] Reverse proxy example:
 
@@ -78,6 +82,9 @@ server {
 
 - [ ] Monitor `GET /health` (liveness) and `GET /v1/audit/verify`
       (chain integrity — alert if `intact` is ever `false`)
+- [ ] Schedule the learning loop weekly:
+      `python -m opsonara.recalibrate_job --min-outcomes 25` (Kubernetes
+      CronJob or crontab); every weight change lands in the audit trail
 - [ ] Restrict network access to the AI-agent callers that need
       `POST /v1/evaluate`; review decisions (`POST /v1/reviews/{id}/decision`)
       should only be reachable from your ops network / VPN

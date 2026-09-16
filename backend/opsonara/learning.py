@@ -21,7 +21,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 # Signal names in canonical order — matches RiskEngine factors.
@@ -52,7 +52,12 @@ STEP = Decimal("0.02")
 
 def clamp_weights(weights: dict[str, Decimal]) -> dict[str, Decimal]:
     """Clamp every weight into ``[default - MAX_DRIFT, default + MAX_DRIFT]``
-    and renormalize to sum to 1.0 exactly (keeps the weighted mean valid)."""
+    and renormalize to sum to exactly 1.0000 (keeps the weighted mean valid).
+
+    The rounding residual from quantizing is absorbed into the largest
+    weight so the sum is *exact* — downstream weighted means then never
+    see a drift like 0.9999.
+    """
     clamped: dict[str, Decimal] = {}
     for name, default in DEFAULT_WEIGHTS.items():
         lo = default - MAX_DRIFT
@@ -61,9 +66,18 @@ def clamp_weights(weights: dict[str, Decimal]) -> dict[str, Decimal]:
         clamped[name] = min(max(w, lo), hi)
     total = sum(clamped.values(), Decimal("0"))
     if total <= 0:  # pathological input; fall back to defaults
-        return dict(DEFAULT_WEIGHTS)
+        return {name: +default for name, default in DEFAULT_WEIGHTS.items()}
     scale = Decimal("1") / total
-    return {name: (w * scale).quantize(Decimal("0.0001")) for name, w in clamped.items()}
+    result = {
+        name: (w * scale).quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+        for name, w in clamped.items()
+    }
+    residual = Decimal("1") - sum(result.values(), Decimal("0"))
+    if residual != 0:
+        # Absorb the quantization residual into the largest weight.
+        biggest = max(result, key=lambda n: result[n])
+        result[biggest] = (result[biggest] + residual).quantize(Decimal("0.0001"))
+    return result
 
 
 @dataclass
@@ -99,7 +113,24 @@ class OutcomeStore:
         self._outcomes: list[OutcomeRecord] = []
         self._weights: dict[str, WeightSet] = {}  # brand_id -> current set
         self._shadow: dict[str, WeightSet] = {}  # brand_id -> shadow set
+        self._recalibrated_upto: dict[str, int] = {}  # brand_id -> outcome count
         self._seq = 0
+
+    # -- recalibration bookkeeping ------------------------------------------
+
+    def mark_recalibrated(self, brand_id: str, outcome_count: int) -> None:
+        """Record that the first ``outcome_count`` outcomes of ``brand_id``
+        have already been consumed by a recalibration run."""
+        with self._lock:
+            prev = self._recalibrated_upto.get(brand_id, 0)
+            self._recalibrated_upto[brand_id] = max(prev, outcome_count)
+
+    def unrecalibrated(self, brand_id: str) -> list[OutcomeRecord]:
+        """Outcomes recorded after the last recalibration consumed them."""
+        with self._lock:
+            start = self._recalibrated_upto.get(brand_id, 0)
+            items = self._outcomes[start:]
+        return [o for o in items if o.brand_id == brand_id]
 
     # -- outcomes -----------------------------------------------------------
 
@@ -212,12 +243,21 @@ class RecalibrationEngine:
     def recalibrate(
         self, brand_id: str, *, min_outcomes: int = 10
     ) -> tuple[WeightSet | None, dict[str, Any]]:
-        outcomes = self._store.outcomes(brand_id)
+        """Nudge weights from *new* outcomes only.
+
+        Idempotent per outcome set: re-running without new outcomes is a
+        no-op (returns the current weights), so a weekly cron can never
+        double-apply the same evidence and drift the model.
+        """
+        outcomes = self._store.unrecalibrated(brand_id)
         if len(outcomes) < min_outcomes:
             return None, {
                 "kind": "recalibration_skipped",
                 "brand_id": brand_id,
-                "reason": f"need >= {min_outcomes} outcomes, have {len(outcomes)}",
+                "reason": (
+                    f"need >= {min_outcomes} new outcomes since the last run, "
+                    f"have {len(outcomes)}"
+                ),
             }
 
         current = self._store.weights_for(brand_id)
@@ -235,9 +275,15 @@ class RecalibrationEngine:
                 new_weights[signal] = new_weights[signal] + STEP  # humans confirm risk
 
         new_set, change_info = self._store.set_weights(brand_id, new_weights)
+        self._store.mark_recalibrated(brand_id, self._store_total_for(brand_id))
         change_info["kind"] = "recalibrated"
         change_info["outcomes_analyzed"] = len(outcomes)
         return new_set, change_info
+
+    def _store_total_for(self, brand_id: str) -> int:
+        """Absolute count of brand outcomes consumed so far (for the cursor)."""
+        all_outcomes = self._store.outcomes(brand_id)
+        return len(all_outcomes)
 
 
 __all__ = [

@@ -158,14 +158,21 @@ class TestGateway:
 
     def test_auth_required_and_enforced(self) -> None:
         app = create_app(
-            {"seed_demo_data": False, "store_backend": "memory", "auth_mode": "api_key"}
+            {
+                "seed_demo_data": False,
+                "store_backend": "memory",
+                "auth_mode": "api_key",
+                "admin_token": "test-operator-token",
+            }
         )
+        admin = {"X-Admin-Token": "test-operator-token"}
         with TestClient(app) as c:
             # no key -> 401
             assert c.post("/v1/evaluate", json=evaluate_payload()).status_code == 401
-            # register a brand, use its key
-            created = c.post("/v1/brands", params={"name": "Acme"}).json()
+            # register a brand (operator), use its key
+            created = c.post("/v1/brands", json={"name": "Acme"}, headers=admin).json()
             assert created["api_key"].startswith("opsk_")
+            assert not created["brand_id"].startswith("brand_opsk_")  # independent of key material
             headers = {"X-Api-Key": created["api_key"]}
             resp = c.post("/v1/evaluate", json=evaluate_payload(), headers=headers)
             assert resp.status_code == 200
@@ -176,6 +183,29 @@ class TestGateway:
             )
             assert bad.status_code == 401
 
+    def test_brand_tenant_cannot_use_admin_endpoints(self) -> None:
+        """Operator gate: a normal brand key gets 403 on /v1/brands & credentials."""
+        app = create_app(
+            {
+                "seed_demo_data": False,
+                "store_backend": "memory",
+                "auth_mode": "api_key",
+                "admin_token": "test-operator-token",
+            }
+        )
+        admin = {"X-Admin-Token": "test-operator-token"}
+        with TestClient(app) as c:
+            created = c.post("/v1/brands", json={"name": "Acme"}, headers=admin).json()
+            headers = {"X-Api-Key": created["api_key"]}
+            resp = c.post(
+                "/v1/credentials",
+                json={"agent_id": "a", "brand_id": created["brand_id"]},
+                headers=headers,
+            )
+            assert resp.status_code == 403
+            resp2 = c.post("/v1/brands", json={"name": "Evil"}, headers=headers)
+            assert resp2.status_code == 403
+
     def test_rate_limit_429(self) -> None:
         app = create_app(
             {
@@ -183,10 +213,12 @@ class TestGateway:
                 "store_backend": "memory",
                 "auth_mode": "api_key",
                 "rate_limit_per_minute": 2,
+                "admin_token": "test-operator-token",
             }
         )
+        admin = {"X-Admin-Token": "test-operator-token"}
         with TestClient(app) as c:
-            created = c.post("/v1/brands", params={"name": "Tiny"}).json()
+            created = c.post("/v1/brands", json={"name": "Tiny"}, headers=admin).json()
             headers = {"X-Api-Key": created["api_key"]}
             assert c.post("/v1/evaluate", json=evaluate_payload(), headers=headers).status_code == 200
             assert c.post("/v1/evaluate", json=evaluate_payload(), headers=headers).status_code == 200
@@ -256,7 +288,7 @@ class TestPolicyPacks:
                 "human_review_limit": "8000.00",
                 "block_limit": "30000.00",
             },
-        )
+        )  # policy packs are data, not secrets — query params fine here
         assert created.status_code == 200
         pack = created.json()
         listed = client.get("/v1/policy-packs", params={"brand_id": "brand_z"}).json()
@@ -356,7 +388,7 @@ class TestConnectors:
         assert "X-Opsonara-Signature" in kwargs["headers"]
 
     def test_unknown_connector_404(self, client: TestClient) -> None:
-        resp = client.post("/v1/connectors/missing/process", json={})
+        resp = client.post("/v1/connectors/missing/process", json={"request": {}})
         assert resp.status_code == 404
 
 
@@ -444,9 +476,25 @@ class TestLearning:
         assert set(weights["weights"]) == set(DEFAULT_WEIGHTS)
         recal = client.post(
             "/v1/learning/recalibrate",
-            params={"brand_id": "default", "min_outcomes": 1},
+            json={"brand_id": "default", "min_outcomes": 1},
         )
         assert recal.status_code == 200
+
+    def test_recalibration_idempotent_per_outcome_set(self, client: TestClient) -> None:
+        """Re-running recalibration without new outcomes must not drift weights."""
+        payload = evaluate_payload()
+        payload["action"]["amount"] = "7000.00"
+        payload["order"]["total"] = "7000.00"
+        review_id = client.post("/v1/evaluate", json=payload).json()["review_id"]
+        client.post(f"/v1/reviews/{review_id}/decision", json={"approved": True, "reviewer": "p"})
+        first = client.post(
+            "/v1/learning/recalibrate", json={"brand_id": "brand_test", "min_outcomes": 1}
+        ).json()
+        assert first["kind"] == "recalibrated"
+        second = client.post(
+            "/v1/learning/recalibrate", json={"brand_id": "brand_test", "min_outcomes": 1}
+        ).json()
+        assert second["kind"] == "recalibration_skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +597,7 @@ class TestIdentity:
         """Credential presented in optional mode → verified provenance in audit."""
         issued = client.post(
             "/v1/credentials",
-            params={"agent_id": "agt_signed", "brand_id": "brand_test", "permission_level": 2},
+            json={"agent_id": "agt_signed", "brand_id": "brand_test", "permission_level": 2},
         ).json()
         payload = evaluate_payload()
         payload["agent"] = {"id": "agt_signed", "name": "Signed Bot", "permission_level": 2}
@@ -566,7 +614,7 @@ class TestIdentity:
         """Optional mode: rejected credential is recorded, request still evaluated."""
         issued = client.post(
             "/v1/credentials",
-            params={"agent_id": "agt_tmp", "brand_id": "brand_test"},
+            json={"agent_id": "agt_tmp", "brand_id": "brand_test"},
         ).json()
         # revoke AFTER issuing, so the token exists but is now untrusted
         revoked = client.post("/v1/credentials/agt_tmp/revoke")
@@ -666,8 +714,11 @@ class TestPlatformMeta:
         assert root["service"]
 
     def test_brands_listing_hides_public(self, client: TestClient) -> None:
-        client.post("/v1/brands", params={"name": "One"})
-        client.post("/v1/brands", params={"name": "Two"})
+        # auth off → anonymous operator; brand creation works directly
+        client.post("/v1/brands", json={"name": "One"})
+        client.post("/v1/brands", json={"name": "Two"})
         brands = client.get("/v1/brands").json()["brands"]
         assert len(brands) == 2
         assert all(b["brand_id"] != "public" for b in brands)
+        # brand ids are random, never derived from key material
+        assert all(not b["brand_id"].startswith("brand_opsk_") for b in brands)

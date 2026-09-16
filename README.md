@@ -13,7 +13,7 @@
   <a href="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml"><img src="https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-5e7aff" alt="python" />
   <img src="https://img.shields.io/badge/fastapi-0.115%2B-22d3ee" alt="fastapi" />
-  <img src="https://img.shields.io/badge/tests-176%20passed-34d399" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-191%20passed-34d399" alt="tests" />
   <img src="https://img.shields.io/badge/mypy-strict%20clean-5e7aff" alt="mypy" />
   <img src="https://img.shields.io/badge/license-MIT-93a1bd" alt="license" />
 </p>
@@ -297,6 +297,8 @@ curl -X POST http://localhost:8000/v1/evaluate \
 | `GET` | `/v1/usage` | Usage metering (per brand, per decision) |
 | `GET`/`POST` | `/v1/billing/…` | Invoice preview + Stripe meter-event reporting |
 | `POST` | `/v1/explain?audit_id=` | Customer-safe decision explainer (no internals) |
+| `POST` | `/v1/webhooks/shopify` | Inbound Shopify webhook (HMAC-verified, then evaluated) |
+| `POST` | `/v1/webhooks/generic` | Inbound generic webhook (HMAC + replay protection) |
 
 All monetary amounts are **`Decimal`-safe**: send strings or ints (floats are rejected with HTTP 422 so no drift ever enters policy comparisons or the audit trail).
 
@@ -353,6 +355,8 @@ The dashboard ships with the API at **`/app/`** — dark, futuristic, operator-f
 | `OPSONARA_SHADOW_MIN_WIN_RATE` | `0.55` | Shadow agreement threshold for promotion |
 | `OPSONARA_STRIPE_API_KEY` | — | When set, billing reports to Stripe meter events |
 | `OPSONARA_BILLING_DRY_RUN` | `true` | Plan Stripe calls without sending (safe default) |
+| `OPSONARA_ADMIN_TOKEN` | — | Operator token for admin endpoints (auto-generated + logged if unset) |
+| `OPSONARA_WEBHOOK_SECRETS` | — | Inbound webhook secrets: `name=secret,name=secret` |
 
 ## Project structure
 
@@ -374,7 +378,7 @@ opsonara/
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 181 unit + integration tests (memory · sqlite · postgres)
+│   ├── tests/              # 196 unit + integration tests (memory · sqlite · postgres · webhooks)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -394,14 +398,15 @@ opsonara/
 | Deterministic security | injection escalation is rule-based, never probabilistic; inputs are Unicode-normalized (NFKC) and stripped of zero-width characters, so homoglyph/zero-width evasion fails; conversation roles are a strict contract |
 | Human-in-the-loop | REVIEW decisions queue for a human; the outcome is appended to the same audit trail |
 | Safe concurrency | thread-safe stores with lock-protected mutation |
-| Verified | 181 tests · strict mypy clean · ruff clean · pip-audit clean · CI + Postgres job on every push · non-root container with healthcheck |
+| Verified | 196 tests · strict mypy clean · ruff clean · CI + Postgres job on every push · non-root container with healthcheck |
 
 ## Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                # 176 passed + 5 postgres integration (CI)
+pytest                # 191 passed + 5 postgres integration (CI)
+python -m opsonara.recalibrate_job --dry-run   # weekly learning loop (cron)
 mypy opsonara         # no issues in 20 source files
 mypy --disallow-untyped-defs opsonara   # strict mode also clean
 ruff check .          # all checks passed

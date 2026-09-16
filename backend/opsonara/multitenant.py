@@ -36,6 +36,16 @@ class BrandTenant:
     """None = any agent; otherwise an explicit allow-list of agent IDs."""
     rate_limit_per_minute: int | None = None
     """None = server default."""
+    is_admin: bool = False
+    """Platform-operator tenant: may create brands, issue credentials, and
+    trigger recalibrations. Regular brand tenants may never."""
+
+
+def new_brand_id() -> str:
+    """Random tenant identifier, independent of any API key material."""
+    import secrets
+
+    return f"brand_{secrets.token_hex(4)}"
 
 
 class BrandRegistry:
@@ -85,6 +95,9 @@ def register_key(tenant: BrandTenant, raw_key: str) -> BrandTenant:
 class RateLimiter:
     """Sliding-window per-key limiter, O(1) amortized, prune-on-request."""
 
+    _MAX_KEYS = 8192
+    """Prune stale buckets when the table grows past this (memory bound)."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._hits: dict[str, list[float]] = {}
@@ -100,7 +113,16 @@ class RateLimiter:
                 return False
             hits.append(now)
             self._hits[key] = hits
+            if len(self._hits) > self._MAX_KEYS:
+                self._prune_locked(now, window)
             return True
+
+    def _prune_locked(self, now: float, window: float) -> None:
+        """Drop buckets with no recent hits so unique keys cannot grow the
+        table without bound (amortized O(n), triggered rarely)."""
+        stale = [k for k, v in self._hits.items() if not v or now - v[-1] > window]
+        for k in stale:
+            del self._hits[k]
 
     def reset(self) -> None:
         with self._lock:
@@ -136,23 +158,46 @@ _limiter = RateLimiter()
 
 
 def build_auth_dependency(
-    registry: BrandRegistry, *, auth_mode: str, signing_required: bool, default_limit: int
+    registry: BrandRegistry,
+    *,
+    auth_mode: str,
+    signing_required: bool,
+    default_limit: int,
+    require_admin: bool = False,
+    bootstrap_admin_token: str = "",
 ) -> Any:
-    """Create the ``Depends`` callable used by protected endpoints."""
+    """Create a ``Depends`` callable for protected endpoints.
+
+    With ``require_admin=True`` the dependency additionally demands an
+    operator tenant (``is_admin``); brand tenants get HTTP 403. The
+    ``bootstrap_admin_token`` (from ``OPSONARA_ADMIN_TOKEN``) is the
+    out-of-band operator credential that solves the first-admin bootstrap
+    problem; it is compared in constant time and never logged.
+    """
 
     async def require_brand(
         request: Request,
         x_api_key: str | None = Header(default=None),
         x_opsonara_timestamp: str | None = Header(default=None),
         x_opsonara_signature: str | None = Header(default=None),
+        x_admin_token: str | None = Header(default=None),
     ) -> BrandTenant:
         if auth_mode == "off":
-            return BrandTenant(brand_id="public", name="public")
+            tenant = BrandTenant(brand_id="public", name="public", is_admin=True)
+            return tenant
+        if (
+            require_admin
+            and bootstrap_admin_token
+            and x_admin_token is not None
+            and hmac.compare_digest(bootstrap_admin_token, x_admin_token)
+        ):
+            return BrandTenant(brand_id="operator", name="operator", is_admin=True)
         if not x_api_key:
             raise HTTPException(status_code=401, detail="missing X-Api-Key header")
-        tenant = registry.find_by_key(x_api_key)
-        if tenant is None:
+        found: BrandTenant | None = registry.find_by_key(x_api_key)
+        if found is None:
             raise HTTPException(status_code=401, detail="unknown or revoked API key")
+        tenant = found
         body = await request.body()
         if tenant.signing_secret is not None:
             if not x_opsonara_timestamp or not x_opsonara_signature:
@@ -171,6 +216,10 @@ def build_auth_dependency(
         limit = tenant.rate_limit_per_minute or default_limit
         if not _limiter.allow(f"{tenant.brand_id}:{x_api_key[:12]}", limit):
             raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if require_admin and not tenant.is_admin:
+            raise HTTPException(
+                status_code=403, detail="operator credentials required for this endpoint"
+            )
         return tenant
 
     return require_brand
@@ -182,6 +231,7 @@ __all__ = [
     "RateLimiter",
     "build_auth_dependency",
     "issue_api_key",
+    "new_brand_id",
     "register_key",
     "verify_signature",
 ]

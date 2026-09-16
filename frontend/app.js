@@ -274,6 +274,102 @@ function wire() {
     if (!btn) return;
     decideReview(btn.dataset.id, btn.dataset.decide === "approve");
   });
+  $("btn-pp-create").addEventListener("click", createPolicyPack);
+  $("btn-pp-refresh").addEventListener("click", refreshPolicyPacks);
+  $("pp-body").addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-activate]");
+    if (!btn) return;
+    activatePolicyPack(btn.dataset.activate);
+  });
+}
+
+/* ================= policy packs (authoring) ================= */
+
+async function refreshPolicyPacks() {
+  try {
+    const data = await api("/v1/policy-packs");
+    const body = $("pp-body");
+    body.innerHTML = "";
+    for (const pack of data.packs) {
+      const tr = document.createElement("tr");
+      const policy = pack.policy || {};
+      const cells = [
+        pack.pack_id,
+        pack.brand_id,
+        pack.version,
+        pack.state,
+        policy.auto_approve_limit ?? "—",
+        policy.human_review_limit ?? "—",
+        policy.block_limit ?? "—",
+      ];
+      for (const value of cells) {
+        const td = document.createElement("td");
+        td.textContent = String(value);
+        if (String(value) === "active") td.style.color = "var(--green)";
+        tr.appendChild(td);
+      }
+      const actionTd = document.createElement("td");
+      if (pack.state !== "active") {
+        const btn = document.createElement("button");
+        btn.className = "btn btn-ghost";
+        btn.dataset.activate = pack.pack_id;
+        btn.textContent = "Activate";
+        actionTd.appendChild(btn);
+      } else {
+        actionTd.textContent = "✓";
+        actionTd.style.color = "var(--green)";
+      }
+      tr.appendChild(actionTd);
+      body.appendChild(tr);
+    }
+    if (!data.packs.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 8;
+      td.className = "muted";
+      td.textContent = "No policy packs yet — create one above.";
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+  } catch (err) {
+    toast(`Policy packs: ${err.message}`);
+  }
+}
+
+async function createPolicyPack() {
+  const brand = $("pp-brand").value.trim();
+  if (!brand) {
+    toast("Brand ID is required");
+    return;
+  }
+  const policy = {
+    brand_id: brand,
+    auto_approve_limit: $("pp-auto").value.trim(),
+    human_review_limit: $("pp-review").value.trim(),
+    block_limit: $("pp-block").value.trim(),
+  };
+  try {
+    // The API takes the policy as the body; brand_id as a query param.
+    await api(`/v1/policy-packs?brand_id=${encodeURIComponent(brand)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(policy),
+    });
+    toast(`Policy pack created for ${brand} — it is now the active version`);
+    await refreshPolicyPacks();
+  } catch (err) {
+    toast(`Create pack: ${err.message}`);
+  }
+}
+
+async function activatePolicyPack(packId) {
+  try {
+    await api(`/v1/policy-packs/${encodeURIComponent(packId)}/activate`, { method: "POST" });
+    toast(`${packId} is now active`);
+    await refreshPolicyPacks();
+  } catch (err) {
+    toast(`Activate: ${err.message}`);
+  }
 }
 
 async function init() {
@@ -286,7 +382,7 @@ async function init() {
     $("api-pill").textContent = "api: offline";
     $("api-pill").style.color = "var(--red)";
   }
-  await Promise.all([refreshStats(), refreshAudit(), refreshReviews()]);
+  await Promise.all([refreshStats(), refreshAudit(), refreshReviews(), refreshPolicyPacks()]);
   setInterval(refreshStats, 15000);
 }
 

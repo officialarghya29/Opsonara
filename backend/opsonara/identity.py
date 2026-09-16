@@ -217,7 +217,17 @@ class MandateRegistry:
     def schemes(self) -> list[str]:
         return sorted(self._verifiers)
 
-    def verify(self, mandate: dict[str, Any], *, brand_id: str) -> MandateVerdict:
+    def verify(self, mandate: Any, *, brand_id: str) -> MandateVerdict:
+        """Verify a presented mandate. Never raises: malformed input —
+        wrong type, unserializable payloads, verifier bugs — becomes an
+        ``invalid`` verdict (the firewall then treats it as unverified),
+        never an HTTP 500."""
+        if not isinstance(mandate, dict):
+            return MandateVerdict(
+                scheme="none",
+                valid=False,
+                detail="mandate must be a JSON object",
+            )
         scheme = str(mandate.get("scheme", ""))
         verifier = self._verifiers.get(scheme)
         if verifier is None:
@@ -226,13 +236,18 @@ class MandateRegistry:
                 valid=False,
                 detail=f"no verifier registered for mandate scheme '{scheme}'",
             )
-        result = verifier.verify(mandate, brand_id=brand_id)
-        return MandateVerdict(
-            scheme=scheme,
-            valid=bool(result.get("valid")),
-            detail=str(result.get("detail", "")),
-            agent_id=result.get("agent_id"),
-        )
+        try:
+            result = verifier.verify(mandate, brand_id=brand_id)
+            valid = bool(result.get("valid"))
+            detail = str(result.get("detail", ""))
+            agent_id = result.get("agent_id")
+        except Exception as exc:  # noqa: BLE001 — a broken verifier is a verdict, not a crash
+            return MandateVerdict(
+                scheme=scheme,
+                valid=False,
+                detail=f"mandate verification error: {exc}",
+            )
+        return MandateVerdict(scheme=scheme, valid=valid, detail=detail, agent_id=agent_id)
 
 
 def provenance_from_credential(cred: AgentCredential | None) -> dict[str, Any]:

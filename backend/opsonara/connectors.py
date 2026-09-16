@@ -189,6 +189,56 @@ class WebhookExecutor:
         return {"blocked": True, "reasons": decision.get("reasons", [])}
 
 
+def verify_shopify_webhook(
+    raw_body: bytes, *, secret: str, header_value: str | None
+) -> bool:
+    """Verify an inbound Shopify webhook's ``X-Shopify-Hmac-Sha256`` header.
+
+    Shopify signs the *raw* request body with base64(HMAC-SHA256(secret, body)).
+    Timing-safe compare; returns False for missing/garbled headers so a
+    forged webhook can never reach the firewall unauthenticated.
+    """
+    import base64
+    import hashlib
+    import hmac as _hmac
+
+    if not header_value or not secret:
+        return False
+    try:
+        expected = base64.b64encode(
+            _hmac.new(secret.encode(), raw_body, hashlib.sha256).digest()
+        ).decode()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return _hmac.compare_digest(expected, header_value)
+
+
+def verify_generic_webhook(
+    raw_body: bytes, *, secret: str, timestamp: str | None, signature: str | None
+) -> bool:
+    """Verify an inbound generic webhook (hex HMAC over ``{ts}.{body}``).
+
+    Mirrors the outbound signing the :class:`WebhookExecutor` performs, so
+    the same secret works both directions. Timestamp tolerance is ±5 min.
+    """
+    import hashlib
+    import hmac as _hmac
+    import time as _time
+
+    if not signature or not secret:
+        return False
+    try:
+        ts = int(timestamp or "")
+    except ValueError:
+        return False
+    if abs(_time.time() - ts) > 300:
+        return False
+    expected = _hmac.new(
+        secret.encode(), f"{ts}.".encode() + raw_body, hashlib.sha256
+    ).hexdigest()
+    return _hmac.compare_digest(expected, signature)
+
+
 def _default_transport(
     url: str,
     *,
@@ -299,4 +349,6 @@ __all__ = [
     "ShopifyExecutor",
     "WebhookExecutor",
     "WooCommerceExecutor",
+    "verify_generic_webhook",
+    "verify_shopify_webhook",
 ]

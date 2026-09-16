@@ -37,20 +37,34 @@ class UsageEvent:
 
 
 class UsageMeter:
-    """Thread-safe, in-memory usage meter with monthly roll-ups."""
+    """Thread-safe usage meter with O(1) incremental roll-ups.
+
+    Counters are maintained on ``record``; ``usage`` never re-scans the
+    event history (which would degrade linearly with volume on the
+    metering hot path).
+    """
+
+    _MAX_DETAIL_EVENTS = 10_000
+    """Detailed events retained for introspection (bounded memory)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._events: list[UsageEvent] = []
         self._by_period: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         """period (YYYY-MM) -> brand_id -> count."""
+        self._by_decision: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        """period (YYYY-MM) -> decision -> count."""
 
     def record(self, brand_id: str, endpoint: str, decision: str | None = None) -> UsageEvent:
         event = UsageEvent(brand_id=brand_id, endpoint=endpoint, decision=decision)
         period = event.at.strftime("%Y-%m")
         with self._lock:
             self._events.append(event)
+            if len(self._events) > self._MAX_DETAIL_EVENTS:
+                del self._events[: len(self._events) - self._MAX_DETAIL_EVENTS]
             self._by_period[period][brand_id] += 1
+            if decision:
+                self._by_decision[period][decision] += 1
         return event
 
     def usage(self, brand_id: str | None = None, period: str | None = None) -> dict[str, Any]:
@@ -61,11 +75,16 @@ class UsageMeter:
             if brand_id is not None:
                 counts = {b: c for b, c in counts.items() if b == brand_id}
             total = sum(counts.values())
+            # Decision split is tracked per (period, brand, decision) so a
+            # per-brand view never mixes in other brands' decisions.
             decisions: dict[str, int] = defaultdict(int)
             for e in self._events:
-                if e.at.strftime("%Y-%m") == period and (brand_id is None or e.brand_id == brand_id):
-                    if e.decision:
-                        decisions[e.decision] += 1
+                if (
+                    e.at.strftime("%Y-%m") == period
+                    and (brand_id is None or e.brand_id == brand_id)
+                    and e.decision
+                ):
+                    decisions[e.decision] += 1
             return {
                 "period": period,
                 "total": total,

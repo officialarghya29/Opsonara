@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,13 +23,24 @@ from pydantic import BaseModel, Field
 
 from opsonara.commercial import DecisionExplainer, StripeBilling, UsageMeter
 from opsonara.config import settings
-from opsonara.connectors import ConnectorService
+from opsonara.connectors import (
+    ConnectorService,
+    verify_generic_webhook,
+    verify_shopify_webhook,
+)
 from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
 from opsonara.core.models import BrandPolicy
 from opsonara.firewall import AuthContext, FirewallEngine, FirewallRequest
 from opsonara.identity import Ap2MandateVerifier, CredentialAuthority, MandateRegistry
 from opsonara.learning import OutcomeStore, RecalibrationEngine
-from opsonara.multitenant import BrandRegistry, BrandTenant, build_auth_dependency, issue_api_key
+from opsonara.multitenant import (
+    BrandRegistry,
+    BrandTenant,
+    build_auth_dependency,
+    issue_api_key,
+    new_brand_id,
+    register_key,
+)
 from opsonara.policy_store import PolicyPackStore
 from opsonara.stores import make_stores
 
@@ -41,6 +52,43 @@ class ReviewDecisionRequest(BaseModel):
 
     approved: bool
     reviewer: str = Field(min_length=1, max_length=120)
+
+
+class CreateBrandRequest(BaseModel):
+    """Body for brand registration. The signing secret travels in the body
+    (never a URL/query, which end up in access logs and proxies)."""
+
+    name: str = Field(min_length=1, max_length=120)
+    signing_secret: str | None = Field(default=None, max_length=256)
+    rate_limit_per_minute: int | None = Field(default=None, ge=0)
+
+
+class IssueCredentialRequest(BaseModel):
+    """Body for credential issuance."""
+
+    agent_id: str = Field(min_length=1, max_length=64)
+    brand_id: str = Field(min_length=1, max_length=64)
+    permission_level: int = Field(default=1, ge=0, le=3)
+    ttl_seconds: int = Field(default=3600, ge=30, le=86400 * 30)
+
+
+class ShadowWeightsRequest(BaseModel):
+    """Body for starting a shadow weight run."""
+
+    weights: dict[str, str]
+
+
+class RecalibrateRequest(BaseModel):
+    """Body for manual recalibration triggers."""
+
+    brand_id: str = Field(min_length=1, max_length=64)
+    min_outcomes: int = Field(default=10, ge=1, le=10_000)
+
+
+class ConnectorProcessRequest(BaseModel):
+    """Body for the connector process endpoint."""
+
+    request: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +132,19 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     firewall = FirewallEngine(audit_store=audit_store, review_store=review_store)
 
     # -- multi-tenant gateway, policy packs, identity, learning, commercial -----
+    # Bootstrap: in api_key mode with no operator token configured, generate a
+    # per-boot token and surface it once in the log (operator must grab it
+    # there). Production sets OPSONARA_ADMIN_TOKEN explicitly.
+    operator_token = app_settings.admin_token
+    if app_settings.auth_mode == "api_key" and not operator_token:
+        import secrets as _secrets
+
+        operator_token = _secrets.token_urlsafe(32)
+        logger.warning(
+            "OPSONARA_ADMIN_TOKEN not set; generated a per-boot operator token. "
+            "Set it explicitly for production. Token (this boot only): %s",
+            operator_token,
+        )
     registry = BrandRegistry()
     policy_packs = PolicyPackStore()
     firewall.policy_packs = policy_packs
@@ -99,9 +160,23 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         signing_required=app_settings.auth_signing_required,
         default_limit=app_settings.rate_limit_per_minute,
     )
+    admin_dependency = build_auth_dependency(
+        registry,
+        auth_mode=app_settings.auth_mode,
+        signing_required=app_settings.auth_signing_required,
+        default_limit=app_settings.rate_limit_per_minute,
+        require_admin=True,
+        bootstrap_admin_token=operator_token,
+    )
     outcome_store = OutcomeStore()
     recalibration = RecalibrationEngine(outcome_store)
     connector_service = ConnectorService(firewall, review_store)
+    webhook_secrets: dict[str, str] = {}
+    for pair in app_settings.webhook_secrets.split(","):
+        pair = pair.strip()
+        if pair and "=" in pair:
+            name, _, secret = pair.partition("=")
+            webhook_secrets[name.strip()] = secret.strip()
     usage_meter = UsageMeter()
     billing = StripeBilling(
         usage_meter,
@@ -180,10 +255,18 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         the context engine is surfaced as HTTP 422 — never a 500.
         """
         try:
-            result = firewall.evaluate(request, auth=AuthContext(brand_id=brand.brand_id))
+            # Anonymous/dev calls (auth off → tenant "public") adopt the
+            # request policy's own brand_id so learning data and audits
+            # land under the brand the caller actually declared.
+            effective_brand = (
+                brand.brand_id
+                if brand.brand_id != "public"
+                else request.policy.brand_id or "public"
+            )
+            result = firewall.evaluate(request, auth=AuthContext(brand_id=effective_brand))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        usage_meter.record(brand.brand_id, "/v1/evaluate", result.decision.value)
+        usage_meter.record(effective_brand, "/v1/evaluate", result.decision.value)
         return result.model_dump(mode="json")
 
     # ------------------------------------------------------------------
@@ -248,7 +331,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         origin = audit_store.get(item.audit_id)
         outcome_store.record(
             audit_id=item.audit_id,
-            brand_id=origin.record.brand_id or "default",
+            brand_id=origin.record.brand_id or "default",  # legacy rows predate brand ids
             review_id=review_id,
             approved=body.approved,
             risk_score=str(origin.record.risk_score),
@@ -283,23 +366,24 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.post("/v1/brands", tags=["gateway"])
     async def create_brand(
-        name: str,
-        signing_secret: str | None = None,
-        rate_limit_per_minute: int | None = None,
+        body: CreateBrandRequest,
+        _: Any = Depends(admin_dependency),  # noqa: B008
     ) -> dict[str, Any]:
-        """Register a brand tenant; returns the API key exactly once."""
+        """Register a brand tenant; returns the API key exactly once.
+
+        Operator-only (admin gate). The brand_id is random and independent
+        of key material; the signing secret stays in the request body.
+        """
         raw_key, prefix = issue_api_key()
         tenant = BrandTenant(
-            brand_id=f"brand_{prefix[:8]}",
-            name=name,
-            signing_secret=signing_secret,
-            rate_limit_per_minute=rate_limit_per_minute,
+            brand_id=new_brand_id(),
+            name=body.name,
+            signing_secret=body.signing_secret,
+            rate_limit_per_minute=body.rate_limit_per_minute,
         )
-        from opsonara.multitenant import register_key
-
         register_key(tenant, raw_key)
         registry.upsert(tenant)
-        return {"brand_id": tenant.brand_id, "name": name, "api_key": raw_key, "prefix": prefix}
+        return {"brand_id": tenant.brand_id, "name": body.name, "api_key": raw_key, "prefix": prefix}
 
     @app.get("/v1/brands", tags=["gateway"])
     async def list_brands() -> dict[str, Any]:
@@ -360,18 +444,23 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.post("/v1/credentials", tags=["identity"])
     async def issue_credential(
-        agent_id: str,
-        brand_id: str,
-        permission_level: int = 1,
-        ttl_seconds: int = 3600,
+        body: IssueCredentialRequest,
+        _: Any = Depends(admin_dependency),  # noqa: B008
     ) -> dict[str, Any]:
+        """Issue a signed agent credential (operator-only)."""
         token, cred = credential_authority.issue(
-            agent_id, brand_id, permission_level, ttl_seconds=ttl_seconds
+            body.agent_id,
+            body.brand_id,
+            body.permission_level,
+            ttl_seconds=body.ttl_seconds,
         )
-        return {"token": token, "expires_at": cred.expires_at, "agent_id": agent_id}
+        return {"token": token, "expires_at": cred.expires_at, "agent_id": body.agent_id}
 
     @app.post("/v1/credentials/{agent_id}/revoke", tags=["identity"])
-    async def revoke_credential(agent_id: str) -> dict[str, Any]:
+    async def revoke_credential(
+        agent_id: str,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
         credential_authority.revoke(agent_id)
         return {"agent_id": agent_id, "revoked": True}
 
@@ -387,11 +476,56 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     async def list_connectors() -> dict[str, Any]:
         return {"connectors": connector_service.list()}
 
+    @app.post("/v1/webhooks/shopify", tags=["connectors"])
+    async def shopify_webhook_ingest(request: Request) -> dict[str, Any]:
+        """Inbound Shopify webhook: verify signature, then evaluate the
+        embedded action through the firewall.
+
+        Configure the same secret in the Shopify app and in
+        ``OPSONARA_WEBHOOK_SECRETS`` (comma-separated brand=secret pairs).
+        Unauthenticated webhooks are rejected with 401 — never processed.
+        """
+        raw = await request.body()
+        header_sig = request.headers.get("X-Shopify-Hmac-Sha256")
+        verified = False
+        for secret in webhook_secrets.values():
+            if verify_shopify_webhook(raw, secret=secret, header_value=header_sig):
+                verified = True
+                break
+        if not verified:
+            raise HTTPException(status_code=401, detail="webhook signature invalid or missing")
+        payload = await request.json()
+        try:
+            return connector_service.process(payload["connector_id"], payload["request"])
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/v1/webhooks/generic", tags=["connectors"])
+    async def generic_webhook_ingest(request: Request) -> dict[str, Any]:
+        """Inbound generic webhook (HMAC over ``{ts}.{raw_body}``, hex)."""
+        raw = await request.body()
+        verified = verify_generic_webhook(
+            raw,
+            secret=next(iter(webhook_secrets.values()), ""),
+            timestamp=request.headers.get("X-Opsonara-Timestamp"),
+            signature=request.headers.get("X-Opsonara-Signature"),
+        )
+        if not verified:
+            raise HTTPException(status_code=401, detail="webhook signature invalid or missing")
+        payload = await request.json()
+        try:
+            return connector_service.process(payload["connector_id"], payload["request"])
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/v1/connectors/{connector_id}/process", tags=["connectors"])
-    async def process_connector(connector_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    async def process_connector(
+        connector_id: str,
+        body: ConnectorProcessRequest,
+    ) -> dict[str, Any]:
         """Evaluate via the connector's firewall, then execute/hold/refuse."""
         try:
-            return connector_service.process(connector_id, request)
+            return connector_service.process(connector_id, body.request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -400,8 +534,13 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.post("/v1/learning/recalibrate", tags=["learning"])
-    async def recalibrate(brand_id: str, min_outcomes: int = 10) -> dict[str, Any]:
-        new_set, info = recalibration.recalibrate(brand_id, min_outcomes=min_outcomes)
+    async def recalibrate(
+        body: RecalibrateRequest,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        new_set, info = recalibration.recalibrate(
+            body.brand_id, min_outcomes=body.min_outcomes
+        )
         if new_set is None:
             return info
         return {**info, "weights": {k: str(v) for k, v in new_set.weights.items()}}
@@ -417,11 +556,15 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         }
 
     @app.post("/v1/learning/shadow", tags=["learning"])
-    async def start_shadow(brand_id: str, weights: dict[str, str]) -> dict[str, Any]:
+    async def start_shadow(
+        brand_id: str,
+        body: ShadowWeightsRequest,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
         from decimal import Decimal
 
         shadow = outcome_store.start_shadow(
-            brand_id, {k: Decimal(v) for k, v in weights.items()}
+            brand_id, {k: Decimal(v) for k, v in body.weights.items()}
         )
         return {"brand_id": brand_id, "state": shadow.state}
 

@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     """When True, requests must carry a valid HMAC signature header (replay-protected)."""
     rate_limit_per_minute: int = 120
     """Per-key request budget for /v1/evaluate and connector endpoints (0 = unlimited)."""
+    admin_token: str = ""
+    """Operator bootstrap token (OPSONARA_ADMIN_TOKEN). Required in production to
+    call operator endpoints (create brands, issue credentials, recalibrate)."""
+    webhook_secrets: str = ""
+    """Inbound webhook secrets, comma-separated name=secret pairs
+    (e.g. 'shopify=whsec_xxx,hooks=whsec_yyy'). Empty disables webhook ingest."""
 
     # -- agent identity ----------------------------------------------------------
     credential_verification: str = "optional"

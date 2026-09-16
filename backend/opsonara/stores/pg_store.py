@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -66,22 +68,107 @@ def _connect(dsn: str) -> Any:
     )
 
 
+class _PgPool:
+    """Thread-safe Postgres connection pool.
+
+    pg8000 declares ``threadsafety = 1``: a connection must not be shared
+    across threads. Under uvicorn, request handlers run on a threadpool,
+    so one shared connection is a data-corruption bug under load. Each
+    ``_PgPool`` user thread checks a connection out, uses it, and returns
+    it; overflow demand creates (and keeps) additional connections.
+    """
+
+    def __init__(self, dsn: str, *, initial: int = 4) -> None:
+        self._dsn = dsn
+        self._lock = threading.Lock()
+        self._idle: list[Any] = []
+        self._all: set[int] = set()
+        self._created = 0
+        for _ in range(initial):
+            self._idle.append(self._new())
+
+    def _new(self) -> Any:
+        conn = _connect(self._dsn)
+        with self._lock:
+            self._all.add(id(conn))
+            self._created += 1
+        return conn
+
+    @contextmanager
+    def connection(self) -> Iterator[Any]:
+        with self._lock:
+            conn = self._idle.pop() if self._idle else None
+        if conn is None:
+            conn = self._new()
+        try:
+            yield conn
+        except Exception:
+            # A connection that raised mid-transaction may be in a broken
+            # state (aborted transaction); recycle it rather than reuse.
+            try:
+                conn.rollback()
+                with self._lock:
+                    self._idle.append(conn)
+            except Exception:
+                self._discard(conn)
+            raise
+        with self._lock:
+            self._idle.append(conn)
+
+    def _discard(self, conn: Any) -> None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with self._lock:
+            self._all.discard(id(conn))
+
+    def close_all(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for conn in idle:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 class _Pg:
-    """Tiny DB-API facade: ``?`` placeholders, tuple rows, explicit commit."""
+    """DB-API facade: ``?`` placeholders, tuple rows, per-thread connections."""
 
     def __init__(self, dsn: str) -> None:
-        self._raw = _connect(dsn)
+        self._pool = _PgPool(dsn)
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
-        cursor = self._raw.cursor()
-        cursor.execute(sql.replace("?", "%s"), list(params))
-        return cursor
+        """Run one statement on a pooled connection and commit.
 
-    def commit(self) -> None:
-        self._raw.commit()
+        The cursor is fully consumed before the connection returns to the
+        pool, so callers can safely ``fetchone()``/``fetchall()`` on the
+        returned cursor afterwards.
+        """
+        with self._pool.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql.replace("?", "%s"), list(params))
+            rows = cursor.fetchall()
+            conn.commit()
+        return _CompletedCursor(rows, cursor.rowcount)
 
     def close(self) -> None:
-        self._raw.close()
+        self._pool.close_all()
+
+
+class _CompletedCursor:
+    """Materialized result of one statement (rows + rowcount)."""
+
+    def __init__(self, rows: list[Any], rowcount: int) -> None:
+        self._rows = rows
+        self.rowcount = rowcount
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[Any]:
+        return list(self._rows)
 
 
 def _as_dict(raw: Any) -> dict[str, Any]:
@@ -102,9 +189,8 @@ class PgAuditStore:
     def __init__(self, dsn: str) -> None:
         self._lock = threading.Lock()
         self._db = _Pg(dsn)
-        for statement in filter(None, (s.strip() for s in _SCHEMA.split(";"))):
+        for statement in filter(None, (st.strip() for st in _SCHEMA.split(";"))):
             self._db.execute(statement)
-        self._db.commit()
         self._verified_ok = True
         self._verified_seq = 0
         self._verified_hash = _GENESIS
@@ -150,7 +236,6 @@ class PgAuditStore:
             seq = (int(last[0]) + 1) if last else 1
             prev_hash = str(last[1]) if last else _GENESIS
             audit_id = self._append_locked(record, prev_hash, seq)
-            self._db.commit()
             return audit_id
 
     def get(self, audit_id: str) -> StoredAudit:
@@ -181,7 +266,6 @@ class PgAuditStore:
                 "UPDATE audit_records SET data = ? WHERE id = ?",
                 (_as_jsonb(data), audit_id),
             )
-            self._db.commit()
 
     def list(
         self,
@@ -305,7 +389,6 @@ class PgReviewStore:
                 "INSERT INTO reviews (id, audit_id, payload, status) VALUES (?, ?, ?, ?)",
                 (review_id, audit_id, _as_jsonb(item.to_dict()), item.status.value),
             )
-            self._db.commit()
         return review_id
 
     def get(self, review_id: str) -> ReviewItem:
@@ -370,7 +453,6 @@ class PgReviewStore:
                 raise AlreadyResolvedError(
                     f"review '{review_id}' already resolved by another worker"
                 )
-            self._db.commit()
 
         origin = self._audit_store.get(item.audit_id)
         self._audit_store.set_human_decision(item.audit_id, item.status.value)
