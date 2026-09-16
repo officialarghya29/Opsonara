@@ -42,6 +42,18 @@ class AgentCredentialError(NotFoundError):
     """Raised when a presented credential is invalid, expired, or untrusted."""
 
 
+# Agent lifecycle states (spec §3): ACTIVE is implicit (not tracked);
+# PAUSED/QUARANTINED are recoverable, REVOKED/DECOMMISSIONED are terminal.
+AGENT_ACTIVE = "active"
+AGENT_PAUSED = "paused"
+AGENT_QUARANTINED = "quarantined"
+AGENT_REVOKED = "revoked"
+
+
+class AgentStateError(AgentCredentialError):
+    """Agent exists but its lifecycle state forbids this action."""
+
+
 @dataclass
 class AgentCredential:
     """A signed per-agent, per-brand credential."""
@@ -53,6 +65,8 @@ class AgentCredential:
     framework_version: str = "1.0"
     issued_at: int = 0
     expires_at: int = 0
+    lifecycle_state: str = AGENT_ACTIVE
+    """Set by ``CredentialAuthority.verify`` — not part of the signed claims."""
 
     def claims(self) -> dict[str, Any]:
         return {
@@ -67,12 +81,26 @@ class AgentCredential:
 
 
 class CredentialAuthority:
-    """Issues and verifies HS256 agent credentials."""
+    """Issues and verifies HS256 agent credentials.
+
+    Also owns the agent lifecycle (spec §3, §28–§29):
+
+    * ``revoke(agent_id)`` — terminal; every verify raises.
+    * ``pause`` / ``resume`` — all actions refused while paused.
+    * ``quarantine`` — compromise containment: the agent may keep *reading*
+      (evaluation continues) but every sensitive action is forced to human
+      review and the credential is flagged in the audit provenance.
+    * ``kill_switch()`` — one call pauses *every* registered agent (the
+      dashboard's big red button); ``resume_all()`` undoes it.
+    """
 
     def __init__(self, signing_key: str | None = None) -> None:
         self._key = signing_key or secrets.token_urlsafe(32)
         self._lock = threading.Lock()
         self._revoked: set[str] = set()
+        self._states: dict[str, str] = {}  # agent_id -> lifecycle state
+        self._known: set[str] = set()  # every agent we ever issued for
+        self._pre_kill_active: set[str] | None = None
 
     def issue(
         self,
@@ -85,6 +113,9 @@ class CredentialAuthority:
         framework_version: str = "1.0",
     ) -> tuple[str, AgentCredential]:
         now = int(time.time())
+        with self._lock:
+            self._known.add(agent_id)
+            self._states.pop(agent_id, None)  # re-issue resets lifecycle state
         cred = AgentCredential(
             agent_id=agent_id,
             brand_id=brand_id,
@@ -139,15 +170,79 @@ class CredentialAuthority:
         with self._lock:
             if cred.agent_id in self._revoked:
                 raise AgentCredentialError(f"credential for '{cred.agent_id}' revoked")
+            state = self._states.get(cred.agent_id, AGENT_ACTIVE)
+        if state == AGENT_PAUSED:
+            raise AgentStateError(f"agent '{cred.agent_id}' is paused (kill switch or manual)")
         if brand_id is not None and cred.brand_id != brand_id:
             raise AgentCredentialError(
                 f"credential issued for brand '{cred.brand_id}', not '{brand_id}'"
             )
+        cred.lifecycle_state = state
         return cred
 
     def revoke(self, agent_id: str) -> None:
         with self._lock:
             self._revoked.add(agent_id)
+            self._states.pop(agent_id, None)
+
+    # -- lifecycle management (spec §3, §28–§29) ---------------------------
+
+    def pause(self, agent_id: str) -> str:
+        """Refuse all actions for this agent until resumed."""
+        with self._lock:
+            self._states[agent_id] = AGENT_PAUSED
+            return AGENT_PAUSED
+
+    def resume(self, agent_id: str) -> str:
+        """Return a paused/quarantined agent to active."""
+        with self._lock:
+            self._states.pop(agent_id, None)
+            return AGENT_ACTIVE
+
+    def quarantine(self, agent_id: str) -> str:
+        """Compromise containment: reads continue, sensitive actions are
+        forced to human review (see ``FirewallEngine.evaluate``)."""
+        with self._lock:
+            self._states[agent_id] = AGENT_QUARANTINED
+            return AGENT_QUARANTINED
+
+    def kill_switch(self) -> list[str]:
+        """Pause every agent ever issued. Returns the affected agent IDs.
+
+        The dashboard's "PAUSE ALL AGENTS" button (spec §28). """
+        with self._lock:
+            previously_active = {
+                a
+                for a in self._known
+                if self._states.get(a, AGENT_ACTIVE) == AGENT_ACTIVE
+                and a not in self._revoked
+            }
+            for agent_id in previously_active:
+                self._states[agent_id] = AGENT_PAUSED
+            self._pre_kill_active = previously_active
+            return sorted(previously_active)
+
+    def resume_all(self) -> list[str]:
+        """Undo a kill switch: re-activate exactly the agents it paused."""
+        with self._lock:
+            affected = self._pre_kill_active or set()
+            for agent_id in affected:
+                if self._states.get(agent_id) == AGENT_PAUSED:
+                    self._states.pop(agent_id, None)
+            self._pre_kill_active = None
+            return sorted(affected)
+
+    def state_of(self, agent_id: str) -> str:
+        with self._lock:
+            return self._states.get(agent_id, AGENT_ACTIVE)
+
+    def agents(self) -> dict[str, str]:
+        """Snapshot of every known agent and its lifecycle state."""
+        with self._lock:
+            return {
+                a: self._states.get(a, AGENT_ACTIVE)
+                for a in sorted(self._known | set(self._states))
+            }
 
     def _sign(self, payload: str) -> str:
         return _b64url(hmac.new(self._key.encode(), payload.encode(), hashlib.sha256).digest())
@@ -271,8 +366,13 @@ def provenance_from_credential(cred: AgentCredential | None) -> dict[str, Any]:
 
 
 __all__ = [
+    "AGENT_ACTIVE",
+    "AGENT_PAUSED",
+    "AGENT_QUARANTINED",
+    "AGENT_REVOKED",
     "AgentCredential",
     "AgentCredentialError",
+    "AgentStateError",
     "Ap2MandateVerifier",
     "CredentialAuthority",
     "MandateRegistry",

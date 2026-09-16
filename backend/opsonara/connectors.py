@@ -278,9 +278,19 @@ def _default_transport(
 class ConnectorService:
     """Routes evaluate requests through the firewall and executes outcomes."""
 
-    def __init__(self, firewall: Any, review_store: Any) -> None:
+    def __init__(
+        self,
+        firewall: Any,
+        review_store: Any,
+        *,
+        verifier: Any = None,
+    ) -> None:
+        """``verifier``: optional :class:`~opsonara.verification.ExecutionVerifier`.
+        When set, ALLOW executions are post-verified against the platform's
+        reported result (spec §24)."""
         self._firewall = firewall
         self._review_store = review_store
+        self._verifier = verifier
         self._lock = threading.Lock()
         self._connectors: dict[str, dict[str, Any]] = {}
 
@@ -308,7 +318,14 @@ class ConnectorService:
             ]
 
     def process(self, connector_id: str, request: dict[str, Any]) -> dict[str, Any]:
-        """Evaluate, then dispatch to the platform executor by decision."""
+        """Evaluate, then dispatch to the platform executor by decision.
+
+        ALLOW executions are post-verified (spec §24): the executor's actual
+        result is compared with the requested amount and a tamper-evident
+        ``execution_verification`` audit record is appended. A mismatch sets
+        ``verification.mismatch`` and carries a HIGH-band BLOCK record — the
+        caller (dashboard/alerting) decides on containment.
+        """
         with self._lock:
             entry = self._connectors.get(connector_id)
         if entry is None:
@@ -316,9 +333,31 @@ class ConnectorService:
         executor: ActionExecutor = entry["executor"]
         verdict = self._firewall.evaluate_request(request)
         decision = verdict.decision.value if hasattr(verdict.decision, "value") else verdict.decision
+        verification: dict[str, Any] | None = None
         if decision == Decision.ALLOW.value:
             detail = executor.execute(request, {"decision": decision})
             outcome = "executed"
+            if self._verifier is not None:
+                result = self._verifier.verify(
+                    request=request,
+                    execution=detail,
+                    audit_id=verdict.audit_id,
+                    connector_id=connector_id,
+                )
+                verification = {
+                    "status": result.status,
+                    "requested": str(result.requested_amount),
+                    "executed": str(result.executed_amount)
+                    if result.executed_amount is not None
+                    else None,
+                    "difference": str(result.difference)
+                    if result.difference is not None
+                    else None,
+                    "mismatch": result.mismatch,
+                    "audit_id": result.audit_id,
+                }
+                if result.mismatch:
+                    outcome = "executed_with_mismatch"
         elif decision == Decision.REVIEW.value:
             review_id = self._hold_for_review(verdict, request)
             detail = executor.hold(request, {"decision": decision, "review_id": review_id})
@@ -335,6 +374,7 @@ class ConnectorService:
             "review_id": verdict.review_id,
             "reasons": verdict.reasons,
             "execution": detail,
+            "verification": verification,
         }
 
     def _hold_for_review(self, verdict: Any, request: dict[str, Any]) -> str | None:

@@ -338,6 +338,15 @@ class AuditRecord(BaseModel):
     human_decision: str | None = None
     provenance: dict[str, Any] | None = None
     """Agent-identity provenance: credential, framework, mandate verdict."""
+    verification_of: str | None = None
+    """For post-execution verification records: audit_id of the verified decision."""
+    connector_id: str | None = None
+    """Connector that executed (or attempted) the action, when applicable."""
+    request_snapshot: dict[str, Any] | None = None
+    """Full original request inputs (action, agent, customer, order, policy,
+    conversation, metadata) for decision reproducibility and policy-simulator
+    replay (spec §12, §37). Not part of the chain fingerprint by design: the
+    fingerprint pins the *decision*, the snapshot explains it."""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -366,6 +375,12 @@ class AuditRecord(BaseModel):
         }
         if self.provenance is not None:
             out["provenance"] = self.provenance
+        if self.verification_of is not None:
+            out["verification_of"] = self.verification_of
+        if self.connector_id is not None:
+            out["connector_id"] = self.connector_id
+        if self.request_snapshot is not None:
+            out["request_snapshot"] = self.request_snapshot
         return out
 
     def fingerprint(self) -> str:

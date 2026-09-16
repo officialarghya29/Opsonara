@@ -42,7 +42,9 @@ from opsonara.multitenant import (
     register_key,
 )
 from opsonara.policy_store import PolicyPackStore
+from opsonara.simulator import PolicySimulator
 from opsonara.stores import make_stores
+from opsonara.verification import ExecutionVerifier
 
 logger = logging.getLogger("opsonara.api")
 
@@ -170,7 +172,11 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     )
     outcome_store = open_outcome_store()
     recalibration = RecalibrationEngine(outcome_store)
-    connector_service = ConnectorService(firewall, review_store)
+    connector_service = ConnectorService(
+        firewall,
+        review_store,
+        verifier=ExecutionVerifier(audit_store),
+    )
     webhook_secrets: dict[str, str] = {}
     for pair in app_settings.webhook_secrets.split(","):
         pair = pair.strip()
@@ -438,6 +444,26 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"pack_id": pack.pack_id, "state": pack.state}
 
+    @app.post("/v1/policy-packs/{pack_id}/simulate", tags=["policy-packs"])
+    async def simulate_policy_pack(
+        pack_id: str,
+        limit: int = Query(default=500, ge=1, le=5000),
+        brand_id: str | None = Query(default=None),
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        """Replay history under a candidate pack WITHOUT deploying it
+        (spec §12). Reports the decision delta, newly reviewed/blocked
+        exposure, and review reduction."""
+        simulator = PolicySimulator(firewall, audit_store)
+        try:
+            return simulator.simulate_pack(
+                pack_id=pack_id, brand_id=brand_id, limit=limit
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # ------------------------------------------------------------------
     # agent identity: credentials & mandates
     # ------------------------------------------------------------------
@@ -463,6 +489,56 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         credential_authority.revoke(agent_id)
         return {"agent_id": agent_id, "revoked": True}
+
+    # -- agent lifecycle: kill switch & quarantine (spec §3, §28–§29) ------
+
+    @app.get("/v1/agents", tags=["agents"])
+    async def list_agents(
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        """Every known agent with its lifecycle state (dashboard AGENTS view)."""
+        return {"agents": credential_authority.agents()}
+
+    @app.post("/v1/agents/{agent_id}/pause", tags=["agents"])
+    async def pause_agent(
+        agent_id: str,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        state = credential_authority.pause(agent_id)
+        return {"agent_id": agent_id, "state": state}
+
+    @app.post("/v1/agents/{agent_id}/resume", tags=["agents"])
+    async def resume_agent(
+        agent_id: str,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        state = credential_authority.resume(agent_id)
+        return {"agent_id": agent_id, "state": state}
+
+    @app.post("/v1/agents/{agent_id}/quarantine", tags=["agents"])
+    async def quarantine_agent(
+        agent_id: str,
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        """Contain a suspect agent: reads continue, sensitive actions are
+        forced to human review until an operator resumes it."""
+        state = credential_authority.quarantine(agent_id)
+        return {"agent_id": agent_id, "state": state}
+
+    @app.post("/v1/agents/kill-switch", tags=["agents"])
+    async def kill_switch(
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        """PAUSE ALL AGENTS (the dashboard's big red button)."""
+        paused = credential_authority.kill_switch()
+        return {"paused": paused, "count": len(paused)}
+
+    @app.post("/v1/agents/resume-all", tags=["agents"])
+    async def resume_all_agents(
+        _: Any = Depends(admin_dependency),  # noqa: B008
+    ) -> dict[str, Any]:
+        restored = credential_authority.resume_all()
+        return {"resumed": restored, "count": len(restored)}
 
     @app.get("/v1/mandates/schemes", tags=["identity"])
     async def mandate_schemes() -> dict[str, Any]:

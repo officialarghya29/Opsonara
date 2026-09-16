@@ -30,6 +30,7 @@ from opsonara.engines.decision import DecisionEngine, DecisionResult
 from opsonara.engines.policy import PolicyEngine
 from opsonara.engines.risk import RiskEngine
 from opsonara.identity import (
+    AGENT_QUARANTINED,
     AgentCredential,
     AgentCredentialError,
     CredentialAuthority,
@@ -105,8 +106,36 @@ class FirewallEngine:
         self.credential_mode: str = "optional"
         """'off' | 'optional' (verify when presented) | 'strict' (required)."""
 
-    def evaluate(self, request: FirewallRequest, auth: AuthContext | None = None) -> FirewallResponse:
+    # Actions a quarantined agent may still request without forced review.
+    # Everything else (refunds, cancellations, price changes…) is forced to
+    # human review while the agent is contained (spec §29).
+    _QUARANTINE_SAFE_ACTIONS = {"read", "lookup", "suggest"}
+
+    def evaluate(
+        self,
+        request: FirewallRequest,
+        auth: AuthContext | None = None,
+        *,
+        simulation: str | None = None,
+        create_review: bool = True,
+    ) -> FirewallResponse:
+        """Run the pipeline for one proposed action.
+
+        ``simulation``: tag the audit record's provenance with the simulating
+        pack (policy-simulator replays). ``create_review=False`` skips the
+        human-review queue — replays must never open real review items.
+        """
         provenance = self._resolve_identity(request, auth)
+        if simulation:
+            provenance = {**(provenance or {}), "simulation": simulation}
+        agent_state = (
+            (provenance or {}).get("lifecycle_state")
+            or (
+                self.credential_authority.state_of(request.agent.id)
+                if self.credential_authority is not None
+                else None
+            )
+        )
         policy = request.policy
         if auth is not None and self.policy_packs is not None:
             policy, _pack_source = self.policy_packs.resolve(auth.brand_id, request.policy)
@@ -133,6 +162,22 @@ class FirewallEngine:
 
         reasons = self._merge_reasons(decision_result.reasons, risk_result.reasons)
 
+        # Quarantine containment (spec §29): a quarantined agent's sensitive
+        # actions are forced to human review regardless of the computed
+        # decision, and the containment is visible in reasons + provenance.
+        quarantined = agent_state == AGENT_QUARANTINED
+        if quarantined and ctx.action.type.value not in self._QUARANTINE_SAFE_ACTIONS:
+            if decision_result.decision is Decision.ALLOW:
+                decision_result = DecisionResult(
+                    decision=Decision.REVIEW,
+                    authorization="denied",
+                    reasons=["agent quarantined: human approval required for all sensitive actions"],
+                )
+                reasons.append("agent quarantined: human approval required for all sensitive actions")
+            if provenance is None:
+                provenance = {}
+            provenance["lifecycle_state"] = AGENT_QUARANTINED
+
         audit_record = AuditRecord(
             action=ctx.action.type.value,
             amount=ctx.amount,
@@ -154,12 +199,21 @@ class FirewallEngine:
             review_id=None,
             human_decision="pending" if decision_result.decision is Decision.REVIEW else None,
             provenance=provenance,
+            request_snapshot={
+                "action": request.action.model_dump(mode="json"),
+                "agent": request.agent.model_dump(mode="json"),
+                "customer": request.customer.model_dump(mode="json"),
+                "order": request.order.model_dump(mode="json") if request.order else None,
+                "policy": policy.model_dump(mode="json"),
+                "conversation": [t.model_dump(mode="json") for t in request.conversation],
+                "metadata": request.metadata,
+            },
         )
 
         audit_id = self._audit_store.append(audit_record)
 
         review_id: str | None = None
-        if decision_result.decision is Decision.REVIEW:
+        if decision_result.decision is Decision.REVIEW and create_review:
             review_id = self._review_store.create(
                 audit_id=audit_id,
                 action=ctx.action.type.value,
