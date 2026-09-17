@@ -490,3 +490,98 @@ def test_risk_engine_tolerates_non_dict_velocity(default_policy):
     )
     result = RiskEngine().evaluate(ctx)
     assert 0 <= result.total <= 1
+
+
+# ---------------------------------------------------------------------------
+# 6 · deepscan round 4: surrogate strings, caps, limits, library-safety
+# ---------------------------------------------------------------------------
+
+
+def test_surrogate_strings_rejected_at_schema_boundary():
+    """Lone UTF-16 surrogates cannot be UTF-8 encoded — accepting them
+    crashed the API at response-render time (UnicodeEncodeError → 500).
+    They must be rejected at validation, never a 500 later. pydantic's own
+    strict UTF-8 check fires first (string_unicode); the SafeStr validator
+    is belt-and-suspenders for lenient decode paths."""
+    import pydantic
+
+    from opsonara.core.models import AgentIdentity, BrandPolicy, ConversationTurn
+
+    for model, kwargs in [
+        (AgentIdentity, {"id": "a", "name": "\udcffbad"}),
+        (BrandPolicy, {"brand_id": "b\udcff"}),
+        (ConversationTurn, {"role": "customer", "content": "hi \udc83"}),
+    ]:
+        with pytest.raises(pydantic.ValidationError):
+            model(**kwargs)  # type: ignore[arg-type]
+
+
+def test_safestr_validator_direct():
+    """The SafeStr guard itself rejects surrogates when reached directly."""
+    from opsonara.core.models import _surrogate_free
+
+    with pytest.raises(ValueError, match="surrogate"):
+        _surrogate_free("\udcff")
+    assert _surrogate_free("ok") == "ok"
+
+
+def test_api_surrogate_payload_is_422_not_500(api_client):
+    resp = api_client.post(
+        "/v1/evaluate",
+        content=b'{"action": {"type": "refund", "amount": "500"}, '
+        b'"agent": {"id": "a", "name": "\\udcff", "permission_level": 2}, '
+        b'"customer": {"id": "C1"}, "policy": {"brand_id": "b"}}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422
+
+
+def test_agent_caps_reject_nonsense_values():
+    """A 0/negative frequency cap would block an agent with zero activity;
+    a negative amount cap is meaningless. Both are validation errors."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        AgentIdentity(id="a", name="A", max_actions_per_hour=0)
+    with pytest.raises(pydantic.ValidationError):
+        AgentIdentity(id="a", name="A", max_actions_per_hour=-3)
+    with pytest.raises(pydantic.ValidationError):
+        AgentIdentity(id="a", name="A", max_action_amount="-5")
+    with pytest.raises(pydantic.ValidationError):
+        AgentIdentity(id="a", name="A", max_action_amount="0")
+
+
+def test_policy_limits_reject_negative_but_allow_zero():
+    """Negative money limits are nonsense; zero is a legal strict config."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        BrandPolicy(brand_id="b", auto_approve_limit="-100")
+    with pytest.raises(pydantic.ValidationError):
+        BrandPolicy(brand_id="b", max_refund_ratio="-1")
+    strict = BrandPolicy(brand_id="b", auto_approve_limit="0")
+    assert strict.auto_approve_limit == 0
+
+
+def test_execution_verifier_none_safe():
+    """Library callers may pass None/junk (the API always passes dicts)."""
+    from opsonara.stores.audit_store import AuditStore
+    from opsonara.verification import ExecutionVerifier
+
+    verifier = ExecutionVerifier(AuditStore())
+    for kwargs in [
+        dict(request=None, execution=None, audit_id="x"),
+        dict(request={"action": "x"}, execution=5, audit_id="x"),
+    ]:
+        result = verifier.verify(**kwargs)
+        assert result.status in {"unverified", "unknown"}
+
+
+def test_lifecycle_ops_report_unknown_agents(api_client):
+    """Preemptive containment stays allowed, but the response surfaces
+    known:false so an operator can spot a typo'd agent id."""
+    r = api_client.post("/v1/agents/agt_typo/pause")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "paused"
+    assert body["known"] is False

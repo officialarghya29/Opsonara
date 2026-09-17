@@ -236,6 +236,17 @@ class CredentialAuthority:
         with self._lock:
             return self._states.get(agent_id, AGENT_ACTIVE)
 
+    def is_known(self, agent_id: str) -> bool:
+        """True when this authority ever issued a credential for the agent.
+
+        Lifecycle operations on unknown IDs still succeed (preemptive
+        containment is allowed), but the API surfaces ``known: false`` so
+        an operator can spot a typo'd agent id instead of believing a real
+        agent was contained.
+        """
+        with self._lock:
+            return agent_id in self._known
+
     def agents(self) -> dict[str, str]:
         """Snapshot of every known agent and its lifecycle state."""
         with self._lock:

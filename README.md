@@ -13,7 +13,7 @@
 [![CI](https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg)](https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-5e7aff?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-254%20passed-34d399?logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-261%20passed-34d399?logo=pytest&logoColor=white)
 ![Types](https://img.shields.io/badge/mypy-strict%20clean-5e7aff?logo=python&logoColor=white)
 ![Postgres](https://img.shields.io/badge/Postgres-16%20verified-4169e1?logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-93a1bd)
@@ -551,7 +551,7 @@ opsonara/
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 254 unit + integration tests (incl. Postgres)
+│   ├── tests/              # 261 unit + integration tests (incl. Postgres)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -575,14 +575,14 @@ opsonara/
 | Containment | quarantine forces review on every sensitive action; kill switch pauses all agents with exact restore |
 | Safe concurrency | thread-safe stores; Postgres decide is a conditional UPDATE — exactly one winner, ever |
 | Explainability | every verdict carries checks, factors, reasons; customer explainer is leak-tested |
-| Verified | **254 tests** (incl. 5 against real Postgres 16) · strict mypy clean · ruff clean · JS syntax-checked · CI on every push |
+| Verified | **261 tests** (incl. 5 against real Postgres 16) · strict mypy clean · ruff clean · JS syntax-checked · CI on every push |
 
 ### Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                    # 254 passed (+5 postgres integration with OPSONARA_TEST_PG_DSN set)
+pytest                    # 261 passed (+5 postgres integration with OPSONARA_TEST_PG_DSN set)
 mypy opsonara opsonara_sdk   # no issues in 33 source files
 ruff check .              # all checks passed
 python -m opsonara.recalibrate_job --dry-run   # weekly learning loop (cron)

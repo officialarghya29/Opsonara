@@ -102,7 +102,15 @@ class ExecutionVerifier:
         audit_id: str,
         connector_id: str | None = None,
     ) -> VerificationResult:
+        # Library-safety: callers may pass None or junk (the API always
+        # passes dicts, but this module is importable on its own).
+        if not isinstance(request, dict):
+            request = {}
+        if not isinstance(execution, dict):
+            execution = {}
         action = request.get("action", {})
+        if not isinstance(action, dict):
+            action = {}
         action_type = str(action.get("type", ""))
         requested: Decimal | None = None
         try:

@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -244,6 +246,18 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     @app.exception_handler(NotFoundError)
     async def _not_found(_: Any, exc: NotFoundError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_: Any, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default 422 echoes the offending input back to the
+        # caller. A lone UTF-16 surrogate in that echo cannot be UTF-8
+        # encoded, which turned *good* validation errors into 500s.
+        # Replace every unencodable character instead.
+        detail = json.loads(json.dumps(exc.errors(), default=str))
+        for err in detail:
+            if isinstance(err.get("input"), str):
+                err["input"] = err["input"].encode("utf-8", "replace").decode("utf-8")
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     @app.exception_handler(AlreadyResolvedError)
     async def _resolved(_: Any, exc: AlreadyResolvedError) -> JSONResponse:
@@ -577,7 +591,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         _: Any = Depends(admin_dependency),  # noqa: B008
     ) -> dict[str, Any]:
         state = credential_authority.pause(agent_id)
-        return {"agent_id": agent_id, "state": state}
+        return {"agent_id": agent_id, "state": state, "known": credential_authority.is_known(agent_id)}
 
     @app.post("/v1/agents/{agent_id}/resume", tags=["agents"])
     async def resume_agent(
@@ -585,7 +599,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         _: Any = Depends(admin_dependency),  # noqa: B008
     ) -> dict[str, Any]:
         state = credential_authority.resume(agent_id)
-        return {"agent_id": agent_id, "state": state}
+        return {"agent_id": agent_id, "state": state, "known": credential_authority.is_known(agent_id)}
 
     @app.post("/v1/agents/{agent_id}/quarantine", tags=["agents"])
     async def quarantine_agent(
@@ -595,7 +609,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         """Contain a suspect agent: reads continue, sensitive actions are
         forced to human review until an operator resumes it."""
         state = credential_authority.quarantine(agent_id)
-        return {"agent_id": agent_id, "state": state}
+        return {"agent_id": agent_id, "state": state, "known": credential_authority.is_known(agent_id)}
 
     @app.post("/v1/agents/kill-switch", tags=["agents"])
     async def kill_switch(

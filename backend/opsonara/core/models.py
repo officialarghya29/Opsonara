@@ -13,11 +13,27 @@ import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from opsonara.core.money import parse_money
+
+
+def _surrogate_free(v: str) -> str:
+    """Reject strings containing UTF-16 surrogate code points.
+
+    JSON allows ``"\\udcff"`` syntactically, but Python cannot UTF-8-encode
+    a lone surrogate — such a value would crash the API at *response* time
+    (UnicodeEncodeError → 500) long after validation. Rejecting at the
+    schema boundary keeps hostile bytes a clean 422 (fail-closed).
+    """
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in v):
+        raise ValueError("string contains unpaired surrogate code points")
+    return v
+
+
+SafeStr = Annotated[str, AfterValidator(_surrogate_free)]
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -107,19 +123,19 @@ class AgentIdentity(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=120)
+    id: SafeStr = Field(min_length=1, max_length=64)
+    name: SafeStr = Field(min_length=1, max_length=120)
     permission_level: int = Field(default=1, ge=0, le=3)
     """0 = read-only, 1 = standard, 2 = senior, 3 = unrestricted."""
     denied_actions: frozenset[str] | list[str] = Field(default_factory=frozenset)
     """Action types this agent may NEVER request (agent-to-tool deny list,
     spec §40). 'customer_data_export' etc. — evaluated before policy, and
     always decisive. Normalized to a frozenset for O(1) checks."""
-    max_action_amount: Decimal | None = None
+    max_action_amount: Decimal | None = Field(default=None, gt=0)
     """Hard per-action amount ceiling for this agent, across ALL action
     types (spec §2 amount limit). None = no agent-level cap (policy bands
     still apply). Decisive when exceeded."""
-    max_actions_per_hour: int | None = None
+    max_actions_per_hour: int | None = Field(default=None, ge=1)
     """Per-agent frequency cap (spec §2 frequency limit). Counted from the
     ``recent_action_counts`` velocity metadata by the API layer. None = no
     agent-level cap."""
@@ -156,7 +172,7 @@ class ConversationTurn(BaseModel):
     """Strict contract: only these two roles exist. Anything else is a
     client error - a lenient parser here would let mistyped roles silently
     skip security scanning of customer messages."""
-    content: str = Field(min_length=1, max_length=4000)
+    content: SafeStr = Field(min_length=1, max_length=4000)
 
 
 class ProposedAction(BaseModel):
@@ -166,9 +182,9 @@ class ProposedAction(BaseModel):
 
     type: ActionType
     amount: Decimal = Field(default=Decimal("0"), ge=0)
-    currency: str = Field(default="INR", min_length=3, max_length=3)
-    order_id: str | None = None
-    customer_id: str | None = None
+    currency: SafeStr = Field(default="INR", min_length=3, max_length=3)
+    order_id: SafeStr | None = None
+    customer_id: SafeStr | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("amount", mode="before")
@@ -193,7 +209,7 @@ class CustomerProfile(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(min_length=1, max_length=64)
+    id: SafeStr = Field(min_length=1, max_length=64)
     lifetime_orders: int = Field(default=0, ge=0)
     lifetime_value: Decimal = Field(default=Decimal("0"), ge=0)
     previous_refunds: int = Field(default=0, ge=0)
@@ -215,13 +231,13 @@ class OrderContext(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(min_length=1, max_length=64)
-    customer_id: str = Field(min_length=1, max_length=64)
-    status: str = Field(min_length=1, max_length=32)
+    id: SafeStr = Field(min_length=1, max_length=64)
+    customer_id: SafeStr = Field(min_length=1, max_length=64)
+    status: SafeStr = Field(min_length=1, max_length=32)
     total: Decimal = Field(gt=0)
     currency: str = Field(default="INR", min_length=3, max_length=3)
-    product_category: str = Field(default="general", max_length=64)
-    fulfillment_stage: str = Field(default="none", max_length=32)
+    product_category: SafeStr = Field(default="general", max_length=64)
+    fulfillment_stage: SafeStr = Field(default="none", max_length=32)
     created_days_ago: int = Field(default=0, ge=0)
 
     @field_validator("total", mode="before")
@@ -256,16 +272,16 @@ class BrandPolicy(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    brand_id: str = Field(min_length=1, max_length=64)
+    brand_id: SafeStr = Field(min_length=1, max_length=64)
 
     # -- spending limits (per action, in the brand's currency) --------------
-    auto_approve_limit: Decimal = Field(default=Decimal("2000"))
-    low_risk_limit: Decimal = Field(default=Decimal("10000"))
-    human_review_limit: Decimal = Field(default=Decimal("10000"))
+    auto_approve_limit: Decimal = Field(ge=0, default=Decimal("2000"))
+    low_risk_limit: Decimal = Field(ge=0, default=Decimal("10000"))
+    human_review_limit: Decimal = Field(ge=0, default=Decimal("10000"))
     """Amounts above this always require a human, even at low risk."""
 
     # -- refund policy -------------------------------------------------------
-    max_refund_ratio: Decimal = Field(default=Decimal("1.00"))
+    max_refund_ratio: Decimal = Field(ge=0, default=Decimal("1.00"))
     """Max refund as a fraction of order total (1.00 = full refund)."""
 
     refund_window_days: int = Field(default=30, ge=0)
@@ -282,7 +298,7 @@ class BrandPolicy(BaseModel):
     min_account_age_days: int = Field(default=0, ge=0)
 
     # -- discount / credit policy --------------------------------------------
-    max_discount_pct: Decimal = Field(default=Decimal("30"))
+    max_discount_pct: Decimal = Field(ge=0, default=Decimal("30"))
 
     # -- human oversight -------------------------------------------------------
     two_person_approval_above: Decimal | None = None
@@ -369,7 +385,7 @@ class AuditRecord(BaseModel):
     amount: Decimal
     currency: str
     customer_id: str | None = None
-    order_id: str | None = None
+    order_id: SafeStr | None = None
     agent_id: str
     brand_id: str | None = None
     """Tenant this decision belongs to (None in single-tenant/dev mode)."""
