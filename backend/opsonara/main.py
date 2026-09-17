@@ -21,7 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from opsonara.commercial import DecisionExplainer, StripeBilling, UsageMeter
 from opsonara.config import settings
@@ -684,12 +684,47 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     async def process_connector(
         connector_id: str,
         body: ConnectorProcessRequest,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
-        """Evaluate via the connector's firewall, then execute/hold/refuse."""
+        """Evaluate via the connector's firewall, then execute/hold/refuse.
+
+        This endpoint **executes real platform actions** — send an
+        ``Idempotency-Key``: the first call's outcome is cached and retries
+        replay it, so a timeout after execution can never cause the platform
+        to be called twice.
+        """
+        key = idempotency_key.strip() if idempotency_key else ""
+        if len(key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key too long (max 256)")
+        fp = fingerprint_payload({"connector_id": connector_id, "request": body.request})
+        if key:
+            cached = idempotency_store.get(key)
+            if cached is not None:
+                if cached["fingerprint"] != fp:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Idempotency-Key was already used with a different request body",
+                    )
+                replay = dict(cached["response"])
+                replay["idempotency_replayed"] = True
+                return replay
+            if not idempotency_store.claim(key, fp):
+                raise HTTPException(status_code=409, detail="request with this Idempotency-Key is in flight")
         try:
-            return connector_service.process(connector_id, body.request)
+            result = connector_service.process(connector_id, body.request)
         except KeyError as exc:
+            if key:
+                idempotency_store.release(key)
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValidationError as exc:
+            # Inner FirewallRequest validation (raw dict from the caller).
+            # Without this, a malformed inner payload is a 500.
+            if key:
+                idempotency_store.release(key)
+            raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
+        if key:
+            idempotency_store.complete(key, fp, result)
+        return result
 
     # ------------------------------------------------------------------
     # learning loop

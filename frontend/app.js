@@ -131,12 +131,19 @@ function renderReviews(items) {
     return;
   }
   host.innerHTML = items
-    .map(
-      (r) => `<div style="display:flex;align-items:center;gap:14px;padding:12px 4px;border-bottom:1px solid rgba(94,122,255,.08);flex-wrap:wrap">
+    .map((r) => {
+      const need = (r.required_approvals || 1) - ((r.approvals || []).length);
+      const twoPerson = (r.required_approvals || 1) > 1;
+      const pendingTag =
+        twoPerson && r.status === "pending"
+          ? `<span class="tag" title="Two-person approval rule — distinct humans must approve">2-person · ${need} more approval${need === 1 ? "" : "s"} needed</span>`
+          : "";
+      return `<div style="display:flex;align-items:center;gap:14px;padding:12px 4px;border-bottom:1px solid rgba(94,122,255,.08);flex-wrap:wrap">
         <span class="mono muted">${esc(r.id)}</span>
         <span><b>${esc(r.action)}</b> · <span class="mono">${esc(r.currency)} ${esc(r.amount)}</span></span>
         <span class="tag ${esc(r.risk_band)}">${esc(r.risk_band)} risk</span>
         <span class="muted" style="flex:1;min-width:200px">${esc(r.reason)}</span>
+        ${pendingTag}
         ${
           r.status === "pending"
             ? `<span class="row-actions review-actions">
@@ -145,8 +152,8 @@ function renderReviews(items) {
                </span>`
             : `<span class="tag ${esc(r.status)}">${esc(r.status)}</span><span class="muted">by ${esc(r.reviewed_by || "—")}</span>`
         }
-      </div>`
-    )
+      </div>`;
+    })
     .join("");
 }
 
@@ -160,13 +167,25 @@ async function refreshReviews() {
 }
 
 async function decideReview(reviewId, approved) {
+  // Two-person rule (§27): the reviewer identity is recorded in the audit
+  // chain, and one human may never approve the same review twice.
+  const who = (prompt("Your name (recorded in the audit chain):", "") || "").trim();
+  if (!who) {
+    toast("Reviewer name is required to decide a review.");
+    return;
+  }
   try {
-    await api(`/v1/reviews/${reviewId}/decision`, {
+    const res = await api(`/v1/reviews/${reviewId}/decision`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approved, reviewer: "console-operator" }),
+      body: JSON.stringify({ approved, reviewer: who }),
     });
-    toast(`Review ${approved ? "approved ✓" : "rejected ✗"} — audit trail updated`);
+    const waiting = res && res.awaiting_approvals > 0;
+    toast(
+      waiting
+        ? `First approval recorded (${who}) — awaiting ${res.awaiting_approvals} more (two-person rule)`
+        : `Review ${approved ? "approved ✓" : "rejected ✗"} — audit trail updated`
+    );
     await Promise.all([refreshReviews(), refreshAudit(), refreshStats()]);
   } catch (err) {
     toast(`Failed: ${err.message}`);

@@ -47,6 +47,28 @@ def live_server() -> Any:
         def log_message(self, *args: Any) -> None:  # silence
             return
 
+    # A recording test connector so SDK execute() has something to target.
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def execute(self, request: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append({"kind": "execute", "action": request["action"]})
+            return {"status": "success", "amount": request["action"]["amount"]}
+
+        def hold(self, request: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append({"kind": "hold", "action": request["action"]})
+            return {"status": "held"}
+
+        def refuse(self, request: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append({"kind": "refuse", "action": request["action"]})
+            return {"status": "refused"}
+
+    executor = RecordingExecutor()
+    app.state.connector_service.register(
+        "conn_test", platform="test", executor=executor, brand_id="brand_test"
+    )
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -144,3 +166,25 @@ class TestOpsonaraSDK:
         sent = {k.lower(): v for k, v in captured["headers"].items()}
         assert sent["x-opsonara-signature"]
         assert sent["x-opsonara-timestamp"]
+
+
+class TestExecuteIdempotency:
+    def test_execute_replays_and_wraps_request(self, live_server: str) -> None:
+        """Two regressions locked in:
+
+        1. ``execute(idempotency_key=...)`` must become the Idempotency-Key
+           header (it previously fell into **kwargs → request body, so the
+           one endpoint that executes real platform actions silently lost
+           replay protection — spec §24).
+        2. The request must be nested under ``"request"`` — the endpoint's
+           contract. Flat posting 422s on every call (previously untested).
+        """
+        ops = Opsonara(base_url=live_server, api_key="dev")
+        base = dict(
+            action=ACTION, agent=AGENT, customer=CUSTOMER, order=ORDER, policy=POLICY
+        )
+        first = ops.execute(connector_id="conn_test", idempotency_key="exec-1", **base)
+        assert first["outcome"] == "executed"
+        second = ops.execute(connector_id="conn_test", idempotency_key="exec-1", **base)
+        assert second["idempotency_replayed"] is True
+        assert second["audit_id"] == first["audit_id"]

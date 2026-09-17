@@ -196,6 +196,7 @@ class Opsonara:
         agent: dict[str, Any],
         customer: dict[str, Any],
         policy: dict[str, Any],
+        idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Evaluate + dispatch through a registered connector (spec §23).
@@ -203,16 +204,25 @@ class Opsonara:
         This is the one-call developers should use instead of writing
         ``if allowed: execute()`` themselves — the firewall stays in the
         execution path and post-execution verification runs automatically.
+
+        ``idempotency_key`` becomes the ``Idempotency-Key`` header: retries
+        with the same key replay the original outcome instead of executing
+        the platform action twice. Strongly recommended — this endpoint
+        executes real platform actions.
         """
-        request = {
+        request: dict[str, Any] = {
             "action": action,
             "agent": agent,
             "customer": customer,
             "policy": policy,
             **kwargs,
         }
+        # The endpoint takes the firewall request nested under "request".
         return self._request(
-            "POST", f"/v1/connectors/{connector_id}/process", request
+            "POST",
+            f"/v1/connectors/{connector_id}/process",
+            {"request": request},
+            idempotency_key=idempotency_key,
         )
 
     def review(self, review_id: str) -> dict[str, Any]:
