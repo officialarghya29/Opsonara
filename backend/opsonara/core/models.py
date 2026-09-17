@@ -347,6 +347,9 @@ class AuditRecord(BaseModel):
     conversation, metadata) for decision reproducibility and policy-simulator
     replay (spec §12, §37). Not part of the chain fingerprint by design: the
     fingerprint pins the *decision*, the snapshot explains it."""
+    blast_radius: dict[str, Any] | None = None
+    """Maximum-impact estimate (spec §19/§40): direct exposure, amplification,
+    max hourly exposure, band."""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def to_audit_dict(self) -> dict[str, Any]:
@@ -381,6 +384,8 @@ class AuditRecord(BaseModel):
             out["connector_id"] = self.connector_id
         if self.request_snapshot is not None:
             out["request_snapshot"] = self.request_snapshot
+        if self.blast_radius is not None:
+            out["blast_radius"] = self.blast_radius
         return out
 
     def fingerprint(self) -> str:

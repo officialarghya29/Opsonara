@@ -160,6 +160,28 @@
       </div>
     </section>
 
+    <!-- ===================== agents — lifecycle control ===================== -->
+    <section class="panel">
+      <h2><span class="dot"></span> Agents — lifecycle control</h2>
+      <p class="muted">
+        Quarantine contains a suspect agent (reads continue, sensitive actions
+        go to human review). The kill switch pauses <b>every</b> agent at once.
+      </p>
+      <div style="display:flex; gap:10px; margin:10px 0; flex-wrap:wrap">
+        <button class="btn btn-red" id="btn-kill">⨂ KILL SWITCH — pause all agents</button>
+        <button class="btn btn-ghost" id="btn-resume-all">↻ Resume all</button>
+        <button class="btn btn-ghost" id="btn-agents-refresh">↻ Refresh agents</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr><th>Agent</th><th>State</th><th></th></tr>
+          </thead>
+          <tbody id="agents-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ===================== audit trail ===================== -->
     <section class="panel">
       <h2><span class="dot"></span> Audit trail — every decision, explained</h2>

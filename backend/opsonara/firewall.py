@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from opsonara.blast import BlastRadius, BlastRadiusEngine
 from opsonara.core.ids import new_id
 from opsonara.core.models import (
     AgentIdentity,
@@ -82,6 +83,9 @@ class FirewallResponse(BaseModel):
     risk_factors: list[Any]
     injection_verdict: str
     injection_score: str
+    blast_radius: dict[str, Any]
+    """Maximum-impact estimate (spec §19/§40): direct exposure, amplification,
+    max hourly exposure and band."""
     audit_id: str
     review_id: str | None = None
     audit: dict[str, Any]
@@ -96,6 +100,7 @@ class FirewallEngine:
         self._policy = PolicyEngine()
         self._risk = RiskEngine()
         self._decision = DecisionEngine()
+        self._blast = BlastRadiusEngine()
         self._audit_store = audit_store
         self._review_store = review_store
         self.policy_packs: PolicyPackStore | None = None
@@ -150,6 +155,10 @@ class FirewallEngine:
             metadata=request.metadata,
         )
 
+        # Blast radius (spec §19, §40): maximum impact if this action is
+        # wrong — computed for every request, attached to the audit record.
+        blast: BlastRadius = self._blast.evaluate(ctx)
+
         policy_result = self._policy.evaluate(ctx)
         risk_result = self._risk.evaluate(ctx)
         decision_result: DecisionResult = self._decision.decide(
@@ -199,6 +208,7 @@ class FirewallEngine:
             review_id=None,
             human_decision="pending" if decision_result.decision is Decision.REVIEW else None,
             provenance=provenance,
+            blast_radius=blast.to_dict(),
             request_snapshot={
                 "action": request.action.model_dump(mode="json"),
                 "agent": request.agent.model_dump(mode="json"),
@@ -237,6 +247,7 @@ class FirewallEngine:
             risk_factors=[f.model_dump(mode="json") for f in risk_result.factors],
             injection_verdict=risk_result.injection_verdict.value,
             injection_score=str(risk_result.injection_score),
+            blast_radius=blast.to_dict(),
             audit_id=audit_id,
             review_id=review_id,
             audit=audit_record.to_audit_dict(),

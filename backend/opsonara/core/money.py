@@ -13,9 +13,14 @@ policy comparisons would run against a value an attacker could nudge.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 
 _TWO_PLACES = Decimal("0.01")
+# Business cap (10^18 - 1): far above any real transaction, but small enough
+# that blast-radius math and store columns can never overflow. The local
+# context below must be able to represent any value this size exactly.
+MAX_AMOUNT_DIGITS = 18
+_QUANTIZE_PREC = MAX_AMOUNT_DIGITS + 4
 _CURRENCIES_WITHOUT_SUBUNIT = frozenset({"JPY", "KRW", "VND", "CLP"})
 _CURRENCIES_WITH_THREE_SUBUNITS = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
 
@@ -40,7 +45,19 @@ def parse_money(value: object, field_name: str = "amount") -> Decimal:
         raise ValueError(f"{field_name} is not a valid amount: {value!r}") from exc
     if not amount.is_finite():
         raise ValueError(f"{field_name} must be a finite amount")
-    quantized = amount.quantize(_TWO_PLACES)
+    if amount.adjusted() >= MAX_AMOUNT_DIGITS:
+        raise ValueError(
+            f"{field_name} exceeds the maximum supported amount "
+            f"(< 10^{MAX_AMOUNT_DIGITS})"
+        )
+    try:
+        # quantize() over the default 28-digit context raises InvalidOperation
+        # for inputs wider than the context — surface that as ValueError.
+        with localcontext() as ctx:
+            ctx.prec = _QUANTIZE_PREC
+            quantized = amount.quantize(_TWO_PLACES)
+    except InvalidOperation as exc:
+        raise ValueError(f"{field_name} is not a valid amount: {value!r}") from exc
     if quantized != amount:
         raise ValueError(
             f"{field_name} has more than 2 decimal places ({value}); "

@@ -20,7 +20,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Policy engine | ✅ | `engines/policy.py`, `policy_store.py` | rules-as-data, per-brand policy packs, versioned + activatable |
 | Policy builder (natural language) | ⬜ | — | spec §10; needs GENERATE→EXPLAIN→VALIDATE→SIMULATE→APPROVE→DEPLOY flow |
 | Policy version control | 🟡 | `policy_store.py` | versioned packs with activation + history; no diff/rollback UI |
-| Policy simulator (spec §12) | ⬜ | — | replay historical transactions against a candidate pack (the replay engine §33 shares machinery) |
+| Policy simulator (spec §12) | ✅ | `simulator.py` | replays persisted request snapshots under a candidate pack; decision delta + exposure; replays never touch the live queue |
 | Shadow mode (policies & weights) | ✅ | `learning.py` | weight-set shadowing with samples/win-rate promotion gates |
 | Risk engine | ✅ | `engines/risk.py` | deterministic signals → calibrated score → LOW/MEDIUM/HIGH/CRITICAL band, factor breakdown |
 | Action risk profiles | 🟡 | `engines/risk.py` | sensitivity weighting exists; full 7-dimension profiles (§15) not yet |
@@ -28,7 +28,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Velocity engine (spec §18) | 🟡 | `engines/risk.py` | anomaly detection from action counts; no autonomous responses (pause/quarantine) yet |
 | Fraud detection | 🟡 | `engines/risk.py` | risk-factor driven; no dedicated fraud model |
 | Prompt-injection detection | ✅ | `core/injection.py` | versioned pattern catalogue, explainable, per-conversation scoring |
-| Blast-radius engine (spec §19) | ⬜ | — | "max impact if wrong" — direct exposure × repetition potential |
+| Blast-radius engine (spec §19) | ✅ | `blast.py` | direct exposure × amplification → max hourly exposure, banded against brand limits, attached to every audit record |
 | Authorization decision | ✅ | `firewall.py` | three-way ALLOW / REVIEW / BLOCK, policy + risk + injection combined |
 
 ## 2 · Execution & verification (spec §23–§25, §44)
@@ -39,7 +39,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Shopify connector | ✅ | `connectors.py` | refund/cancel executors + HMAC webhook ingest |
 | WooCommerce connector | ✅ | `connectors.py` | REST executors |
 | Generic webhook connector | ✅ | `connectors.py` | signed outbound + verified inbound |
-| Post-execution verification (spec §24) | ⬜ | — | compare requested vs actual result; detect "asked ₹1.5k, executed ₹15k" |
+| Post-execution verification (spec §24) | ✅ | `verification.py` | requested vs executed comparison, chained mismatch records, connector-integrated |
 | Idempotency / replay protection | 🟡 | `connectors.py`, `multitenant.py` | webhook signature timestamps; no per-action idempotency keys on evaluate/execute |
 | More platforms (§44) | ⬜ | — | Magento, BigCommerce, Stripe, CRM/security tools |
 
@@ -50,8 +50,8 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Human review queue | ✅ | `stores/review_store.py`, `main.py` | approve/reject, reviewer recorded, race-safe conditional updates |
 | Review → learning feedback | ✅ | `learning.py`, `main.py` | verdicts pair with decision signals → bounded recalibration |
 | Two-person approval (spec §27) | ⬜ | — | second approval for > ₹50k / bulk / data-export actions |
-| Agent kill switch (spec §28) | 🟡 | `multitenant.py` | API-key revocation exists; one-click "pause all agents" not yet |
-| Quarantine mode (spec §29) | ⬜ | — | read-only agent state: everything sensitive → human review |
+| Agent kill switch (spec §28) | ✅ | `identity.py`, `main.py`, console | one call pauses every agent, exact restore on resume; dashboard button in the console |
+| Quarantine mode (spec §29) | ✅ | `identity.py`, `firewall.py` | reads continue, sensitive actions forced to human review, provenance flagged |
 | Incident management (spec §30–§31) | ⬜ | — | incident objects, timelines, auto-containment |
 | Notification engine (spec §43) | ⬜ | — | Slack/PagerDuty/email on CRITICAL decisions |
 | Attack lab (spec §32) | ⬜ | — | scripted attack simulations (major demo feature); today: `tests/test_injection.py` covers the detection layer |
@@ -63,10 +63,10 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Immutable audit trail | ✅ | `stores/*` | SHA-256 hash chain, tamper-evident, memory/SQLite/Postgres |
 | Chain verification | ✅ | `stores/*` | incremental O(new) verify + authoritative `force=True` full walk |
 | Provenance (agent/credential/model) | ✅ | `identity.py`, `firewall.py` | credential, framework, version, level recorded per decision |
-| Decision reproducibility (spec §37) | 🟡 | audit records | full inputs persisted; no "re-decide this request" tooling yet (replay engine) |
+| Decision reproducibility (spec §37) | ✅ | `request_snapshot`, `simulator.py` | full inputs persisted per record; the simulator re-decides them under any candidate policy |
 | Event timeline per transaction (spec §39) | 🟡 | audit records | decision + human outcome chained; tool-call/external-response steps not yet |
 | Model governance (spec §36) | 🟡 | audit provenance | agent framework/version recorded; policy/risk engine versions not embedded per record |
-| Risk-exposure analytics (spec §40) | ⬜ | — | "₹42.8L autonomous exposure" style dashboards |
+| Risk-exposure analytics (spec §40) | 🟡 | `blast.py` | per-decision max hourly exposure recorded; aggregate dashboards not yet |
 
 ## 5 · Learning loop (spec §34–§35)
 
@@ -98,7 +98,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 
 | Spec area | Status | Where | Notes |
 |---|---|---|---|
-| Python SDK (`pip install opsonara`) | ⬜ | — | thin client over `/v1/evaluate` + `/v1/execute` |
+| Python SDK (`opsonara_sdk`) | ✅ | `backend/opsonara_sdk/` | evaluate/execute/review/audit client, retry with backoff, optional signing, typed `Decision` (`.allowed`/`.review_required`/`.blocked`) |
 | TypeScript SDK | ⬜ | — | |
 | MCP gateway (spec §45) | ⬜ | — | Opsonara as the tool-authorization layer for MCP servers |
 | CLI (spec §49) | 🟡 | `recalibrate_job.py` | one operational CLI exists; `opsonara init/dev/simulate/replay` not yet |

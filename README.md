@@ -339,6 +339,11 @@ Layered on the core five-stage pipeline without changing it:
 | **Metering & billing** | `commercial.py` | Per-brand usage events, invoice previews, Stripe meter-event reporting (dry-run by default) |
 | **Customer explainer** | `commercial.py` | Stripped-down, non-internal decision explanation for the brand's support flow |
 | **Postgres backend** | `stores/pg_store.py` | Horizontal-scale audit + reviews; same hash-chain guarantees, conditional-UPDATE review decisions, O(1) counters |
+| **Agent lifecycle & kill switch** | `identity.py` | Pause / resume / quarantine per agent; one-call kill switch pauses all agents with exact restore; quarantined agents keep read access but every sensitive action is forced to human review |
+| **Blast-radius engine** | `blast.py` | "If this action is wrong, how bad is it?" — direct exposure × amplification → max hourly exposure, banded against brand limits, attached to every audit record |
+| **Post-execution verification** | `verification.py` | Compares the platform's actual result with the requested amount; mismatches append a chained BLOCK record (`asked ₹1.5k, executed ₹15k` becomes tamper-evident) |
+| **Policy simulator** | `simulator.py` | Replay persisted history under a candidate pack before deploying — decision delta, newly reviewed/blocked exposure, review reduction; replays never touch the live review queue |
+| **Python SDK** | `opsonara_sdk/` | `pip`-installable client: `ops.evaluate(...)`, `ops.execute(...)` (firewall stays in the execution path), retries with backoff, optional request signing, typed `Decision` with `.allowed` / `.review_required` / `.blocked` |
 
 ```python
 # The learning loop in one pass:

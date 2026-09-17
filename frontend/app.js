@@ -281,6 +281,18 @@ function wire() {
     if (!btn) return;
     activatePolicyPack(btn.dataset.activate);
   });
+  $("btn-kill").addEventListener("click", () => {
+    if (confirm("KILL SWITCH: pause ALL agents until resumed?")) killSwitch();
+  });
+  $("btn-resume-all").addEventListener("click", resumeAll);
+  $("btn-agents-refresh").addEventListener("click", refreshAgents);
+  $("agents-body").addEventListener("click", (event) => {
+    const btn = event.target.closest("button");
+    if (!btn) return;
+    if (btn.dataset.quarantine) agentAction("quarantine", btn.dataset.quarantine);
+    else if (btn.dataset.pause) agentAction("pause", btn.dataset.pause);
+    else if (btn.dataset.resume) agentAction("resume", btn.dataset.resume);
+  });
 }
 
 /* ================= policy packs (authoring) ================= */
@@ -372,6 +384,96 @@ async function activatePolicyPack(packId) {
   }
 }
 
+/* ================= agents — lifecycle control ================= */
+
+const STATE_COLORS = {
+  active: "var(--green)",
+  quarantined: "var(--amber, #e0a83c)",
+  paused: "var(--red)",
+};
+
+async function refreshAgents() {
+  try {
+    const data = await api("/v1/agents");
+    const body = $("agents-body");
+    body.innerHTML = "";
+    const entries = Object.entries(data.agents || {});
+    for (const [agentId, state] of entries) {
+      const tr = document.createElement("tr");
+      const nameTd = document.createElement("td");
+      nameTd.textContent = agentId;
+      const stateTd = document.createElement("td");
+      stateTd.textContent = state;
+      stateTd.style.color = STATE_COLORS[state] || "inherit";
+      const actionTd = document.createElement("td");
+      if (state === "active") {
+        const q = document.createElement("button");
+        q.className = "btn btn-ghost";
+        q.dataset.quarantine = agentId;
+        q.textContent = "Quarantine";
+        const p = document.createElement("button");
+        p.className = "btn btn-ghost";
+        p.style.marginLeft = "6px";
+        p.dataset.pause = agentId;
+        p.textContent = "Pause";
+        actionTd.append(q, p);
+      } else {
+        const r = document.createElement("button");
+        r.className = "btn btn-ghost";
+        r.dataset.resume = agentId;
+        r.textContent = "Resume";
+        actionTd.appendChild(r);
+      }
+      tr.append(nameTd, stateTd, actionTd);
+      body.appendChild(tr);
+    }
+    if (!entries.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "muted";
+      td.textContent =
+        "No agents registered yet — issue a credential to register one.";
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+  } catch (err) {
+    toast(`Agents: ${err.message}`);
+  }
+}
+
+async function killSwitch() {
+  try {
+    const data = await api("/v1/agents/kill-switch", { method: "POST" });
+    toast(`KILL SWITCH: ${data.count} agent(s) paused`);
+    await refreshAgents();
+  } catch (err) {
+    toast(`Kill switch: ${err.message}`);
+  }
+}
+
+async function resumeAll() {
+  try {
+    const data = await api("/v1/agents/resume-all", { method: "POST" });
+    toast(`Resumed ${data.count} agent(s)`);
+    await refreshAgents();
+  } catch (err) {
+    toast(`Resume all: ${err.message}`);
+  }
+}
+
+async function agentAction(action, agentId) {
+  try {
+    const data = await api(`/v1/agents/${encodeURIComponent(agentId)}/${action}`, {
+      method: "POST",
+    });
+    toast(`${agentId} → ${data.state}`);
+    await refreshAgents();
+  } catch (err) {
+    toast(`${action}: ${err.message}`);
+  }
+}
+
 async function init() {
   wire();
   try {
@@ -382,7 +484,13 @@ async function init() {
     $("api-pill").textContent = "api: offline";
     $("api-pill").style.color = "var(--red)";
   }
-  await Promise.all([refreshStats(), refreshAudit(), refreshReviews(), refreshPolicyPacks()]);
+  await Promise.all([
+    refreshStats(),
+    refreshAudit(),
+    refreshReviews(),
+    refreshPolicyPacks(),
+    refreshAgents(),
+  ]);
   setInterval(refreshStats, 15000);
 }
 

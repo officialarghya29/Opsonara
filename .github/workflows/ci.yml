@@ -41,7 +41,7 @@ jobs:
 
       - name: Typecheck (mypy)
         working-directory: backend
-        run: mypy opsonara
+        run: mypy opsonara opsonara_sdk
 
       - name: Tests (pytest)
         working-directory: backend

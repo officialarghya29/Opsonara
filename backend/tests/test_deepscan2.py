@@ -7,11 +7,13 @@ store branch gaps.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from pydantic import ValidationError
 
 from opsonara.core.injection import analyze_conversation
-from opsonara.core.models import ConversationTurn
+from opsonara.core.models import ActionType, ConversationTurn, ProposedAction
 from opsonara.stores.sqlite_store import SqliteAuditStore, SqliteReviewStore, make_stores
 from tests.test_sqlite_stores import make_review_request_record  # noqa: F401
 
@@ -193,3 +195,54 @@ class TestRootEndpoint:
         res = api_client.get("/")
         assert res.status_code == 200
         assert any("evaluate" in e for e in res.json()["endpoints"])
+
+
+# ---------------------------------------------------------------------------
+# Deepscan round 3: money cap, blast velocity clamp, API 422 for huge amounts
+# ---------------------------------------------------------------------------
+
+def test_parse_money_rejects_huge_amounts():
+    """quantize() must never raise InvalidOperation — hostile 30-digit
+    amounts come back as a clean ValueError (API 422), not a 500."""
+    from opsonara.core.money import parse_money
+
+    with pytest.raises(ValueError, match="exceeds the maximum supported amount"):
+        parse_money("9" * 30)
+    with pytest.raises(ValueError):
+        parse_money("1e18")  # exactly the cap boundary is excluded
+    assert parse_money("99999999999999999.99") == Decimal("99999999999999999.99")
+
+
+def test_proposed_action_huge_amount_is_validation_error():
+    with pytest.raises(ValidationError):
+        ProposedAction(type=ActionType.REFUND, amount="9" * 30)
+
+
+def test_blast_velocity_metadata_never_crashes(default_policy):
+    """Garbage/hostile velocity metadata degrades to the safe default."""
+    from opsonara.blast import BlastRadiusEngine
+    from opsonara.engines.context import RequestContext
+
+    engine = BlastRadiusEngine()
+    action = ProposedAction(type=ActionType.REFUND, amount="500")
+    for bad in [
+        {"recent_action_counts": {"refund": "abc"}},
+        {"recent_action_counts": {"refund": "1e40"}},
+        {"recent_action_counts": {"refund": None}},
+        {"recent_action_counts": [1, 2]},
+        {"recent_action_counts": None},
+        None,
+    ]:
+        ctx = RequestContext(
+            action=action, agent=None, customer=None, order=None,
+            policy=default_policy, conversation=[], history=[], metadata=bad,
+        )
+        result = engine.evaluate(ctx)
+        assert result.repeats_per_hour > 0
+        assert Decimal("0") < result.max_hourly_exposure < Decimal("10") ** 16
+
+
+def test_api_huge_amount_returns_422_not_500(api_client):
+    """End-to-end: a hostile 30-digit amount must be a validation error."""
+    resp = api_client.post("/v1/evaluate", json={"action": {"type": "refund", "amount": "9" * 30}})
+    assert resp.status_code == 422
