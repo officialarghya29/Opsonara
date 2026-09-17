@@ -111,6 +111,42 @@ class AgentIdentity(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     permission_level: int = Field(default=1, ge=0, le=3)
     """0 = read-only, 1 = standard, 2 = senior, 3 = unrestricted."""
+    denied_actions: frozenset[str] | list[str] = Field(default_factory=frozenset)
+    """Action types this agent may NEVER request (agent-to-tool deny list,
+    spec §40). 'customer_data_export' etc. — evaluated before policy, and
+    always decisive. Normalized to a frozenset for O(1) checks."""
+    max_action_amount: Decimal | None = None
+    """Hard per-action amount ceiling for this agent, across ALL action
+    types (spec §2 amount limit). None = no agent-level cap (policy bands
+    still apply). Decisive when exceeded."""
+    max_actions_per_hour: int | None = None
+    """Per-agent frequency cap (spec §2 frequency limit). Counted from the
+    ``recent_action_counts`` velocity metadata by the API layer. None = no
+    agent-level cap."""
+
+    @field_validator("denied_actions", mode="after")
+    @classmethod
+    def _freeze_denied(cls, v: frozenset[str] | list[str]) -> frozenset[str]:
+        return frozenset(v)
+
+    @field_validator("max_action_amount", mode="before")
+    @classmethod
+    def _quantize_cap(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, float):
+            raise ValueError("max_action_amount must be a string or int, not a float")
+        return parse_money(v, "max_action_amount")
+
+
+class AgentAuthorizationVerdict(BaseModel):
+    """Result of the fine-grained agent-authorization gate (spec §2, §40)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    allowed: bool
+    check_name: str
+    detail: str
 
 
 class ConversationTurn(BaseModel):
@@ -247,6 +283,20 @@ class BrandPolicy(BaseModel):
 
     # -- discount / credit policy --------------------------------------------
     max_discount_pct: Decimal = Field(default=Decimal("30"))
+
+    # -- human oversight -------------------------------------------------------
+    two_person_approval_above: Decimal | None = None
+    """Amount above which a REVIEW requires TWO distinct human approvals
+    before execution (spec §27 two-person rule). None = single approval."""
+
+    @field_validator("two_person_approval_above", mode="before")
+    @classmethod
+    def _quantize_two_person(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, float):
+            raise ValueError("two_person_approval_above must be a string or int, not a float")
+        return parse_money(v, "two_person_approval_above")
 
     @field_validator(
         "auto_approve_limit",

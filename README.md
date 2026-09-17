@@ -13,7 +13,7 @@
 [![CI](https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml/badge.svg)](https://github.com/officialarghya29/Opsonara/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-5e7aff?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-226%20passed-34d399?logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-254%20passed-34d399?logo=pytest&logoColor=white)
 ![Types](https://img.shields.io/badge/mypy-strict%20clean-5e7aff?logo=python&logoColor=white)
 ![Postgres](https://img.shields.io/badge/Postgres-16%20verified-4169e1?logo=postgresql&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-93a1bd)
@@ -393,6 +393,9 @@ curl -X POST http://localhost:8000/v1/evaluate \
 | Multi-tenant gateway | `multitenant.py` | ✅ | per-brand keys (hashed), HMAC request signing, replay protection, rate limits |
 | Connectors | `connectors.py` | ✅ | Shopify · WooCommerce · generic webhook — ALLOW executes, REVIEW holds, BLOCK refuses |
 | Verified webhooks (inbound) | `main.py` | ✅ | Shopify HMAC + generic HMAC with replay window |
+| **Idempotency** | `idempotency.py` | ✅ | `Idempotency-Key` on `/v1/evaluate`: retries replay the original verdict (a timeout can never double-refund); in-flight duplicates get 409; same-key-different-body gets 422 |
+| **Fine-grained agent authorization** | `agent_authz.py` | ✅ | per-agent deny list, hard amount cap, hourly frequency cap — decisive, evaluated before policy (agent-to-tool permission graph) |
+| **Two-person approval** | `stores/`, `firewall.py` | ✅ | `two_person_approval_above` policy limit → REVIEW items require two **distinct** humans; duplicate/second approvals rejected; partial receipt is chained |
 | Metering & billing | `commercial.py` | ✅ | per-brand usage events, invoice previews, Stripe meter events (dry-run default) |
 | Customer explainer | `commercial.py` | ✅ | filtered, customer-safe decision explanation (leak-tested) |
 | Stores: memory · SQLite · Postgres 16 | `stores/` | ✅ | same hash-chain guarantees; conditional-UPDATE review decide; O(1) counters |
@@ -444,6 +447,15 @@ curl -X POST http://localhost:8000/v1/evaluate \
 
 All monetary amounts are **`Decimal`-safe**: strings or ints only — floats are rejected with HTTP 422 so binary-float drift can never enter policy comparisons or the audit trail.
 
+**Idempotency (consequential actions):** send an `Idempotency-Key` header (or `idempotency_key=` in the SDK) on `/v1/evaluate`:
+
+| Situation | Response |
+|---|---|
+| first call with a key | processed normally, verdict cached |
+| retry with the same key + body | **original verdict replayed** (`idempotency_replayed: true`) — no second execution |
+| duplicate while first still in flight | `409 Conflict` — wait, don't assume |
+| same key, different body | `422` — client bug or tampering; never silently processed |
+
 ---
 
 ## ⚡ Performance
@@ -494,6 +506,7 @@ The operator dashboard ships with the API at **`/app/`** — dark, futuristic, b
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `OPSONARA_MODE` | `dev` | `dev` or `production` — production **refuses to boot** without api-key auth, an explicit admin token, and non-wildcard CORS; force-disables demo seeding and forces strict credential verification |
 | `OPSONARA_STORE_BACKEND` | `memory` | `memory` · `sqlite` (persists) · `postgres` (multi-instance) |
 | `OPSONARA_DB_PATH` | `opsonara.db` | SQLite file when the sqlite backend is enabled |
 | `OPSONARA_PG_DSN` | — | Postgres DSN when the postgres backend is enabled |
@@ -538,7 +551,7 @@ opsonara/
 │   │   ├── demo_data.py    # realistic seeded scenarios
 │   │   └── main.py         # FastAPI application
 │   ├── benchmarks/         # efficiency benchmark suite
-│   ├── tests/              # 226 unit + integration tests (incl. Postgres)
+│   ├── tests/              # 254 unit + integration tests (incl. Postgres)
 │   ├── requirements.txt / requirements-dev.txt
 │   └── pyproject.toml      # pytest · ruff · mypy config
 ├── frontend/               # console UI (served at /app)
@@ -562,14 +575,14 @@ opsonara/
 | Containment | quarantine forces review on every sensitive action; kill switch pauses all agents with exact restore |
 | Safe concurrency | thread-safe stores; Postgres decide is a conditional UPDATE — exactly one winner, ever |
 | Explainability | every verdict carries checks, factors, reasons; customer explainer is leak-tested |
-| Verified | **226 tests** (incl. 5 against real Postgres 16) · strict mypy clean · ruff clean · JS syntax-checked · CI on every push |
+| Verified | **254 tests** (incl. 5 against real Postgres 16) · strict mypy clean · ruff clean · JS syntax-checked · CI on every push |
 
 ### Testing
 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest                    # 226 passed (+5 postgres integration with OPSONARA_TEST_PG_DSN set)
+pytest                    # 254 passed (+5 postgres integration with OPSONARA_TEST_PG_DSN set)
 mypy opsonara opsonara_sdk   # no issues in 33 source files
 ruff check .              # all checks passed
 python -m opsonara.recalibrate_job --dry-run   # weekly learning loop (cron)

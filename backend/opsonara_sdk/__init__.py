@@ -143,12 +143,18 @@ class Opsonara:
         agent_credential: str | None = None,
         mandate: dict[str, Any] | None = None,
         raise_on_block: bool = False,
+        idempotency_key: str | None = None,
     ) -> Decision:
         """Evaluate one proposed action through the firewall.
 
         With ``raise_on_block=True`` a BLOCK raises :class:`ActionBlocked`
         and a REVIEW raises :class:`ReviewRequired` — the "can't mis-handle
         the verdict" style. Default returns the :class:`Decision` either way.
+
+        ``idempotency_key``: send a unique key per logical action (e.g. the
+        support ticket id). Retries with the same key replay the original
+        verdict instead of executing twice — a timeout can never cause a
+        second refund.
         """
         payload: dict[str, Any] = {
             "action": action,
@@ -165,7 +171,12 @@ class Opsonara:
         if mandate is not None:
             payload["mandate"] = mandate
         decision = self._decision_from(
-            self._request("POST", "/v1/evaluate", payload)
+            self._request(
+                "POST",
+                "/v1/evaluate",
+                payload,
+                idempotency_key=idempotency_key,
+            )
         )
         if raise_on_block and decision.blocked:
             raise ActionBlocked(
@@ -246,12 +257,21 @@ class Opsonara:
             raw=body,
         )
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         body = json.dumps(payload).encode() if payload is not None else None
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
-                return self._request_once(method, path, body)
+                return self._request_once(
+                    method, path, body, idempotency_key=idempotency_key
+                )
             except OpsonaraError as exc:
                 last_error = exc
                 status = getattr(exc, "status_code", None)
@@ -263,8 +283,17 @@ class Opsonara:
                 time.sleep(min(delay, 5.0))
         raise last_error if last_error else OpsonaraError("unreachable")  # pragma: no cover
 
-    def _request_once(self, method: str, path: str, body: bytes | None) -> dict[str, Any]:
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         if self._api_key:
             headers["X-Api-Key"] = self._api_key
         if self._admin_token:

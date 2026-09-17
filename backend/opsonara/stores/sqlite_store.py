@@ -18,7 +18,6 @@ import json
 import sqlite3
 import threading
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,13 @@ from opsonara.core.ids import new_id
 from opsonara.core.models import AuditRecord, ReviewStatus
 from opsonara.stores.audit_store import _GENESIS, StoredAudit, _chain_hash
 from opsonara.stores.protocols import AuditStoreProtocol, ReviewStoreProtocol
-from opsonara.stores.review_store import ReviewItem
+from opsonara.stores.review_store import (
+    _OUTCOME_PARTIAL,
+    ReviewItem,
+    apply_review_decision,
+    build_human_record,
+    build_partial_receipt,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_records (
@@ -290,6 +295,7 @@ class SqliteReviewStore:
         reason: str,
         risk_band: str,
         risk_score: str,
+        required_approvals: int = 1,
     ) -> str:
         review_id = new_id("rev")
         item = ReviewItem(
@@ -303,6 +309,7 @@ class SqliteReviewStore:
             reason=reason,
             risk_band=risk_band,
             risk_score=risk_score,
+            required_approvals=max(int(required_approvals), 1),
         )
         with self._lock:
             self._conn.execute(
@@ -357,32 +364,45 @@ class SqliteReviewStore:
             if row is None:
                 raise NotFoundError(f"review '{review_id}' not found")
             item = self._to_item(row)
-            if item.status is not ReviewStatus.PENDING:
-                raise AlreadyResolvedError(
-                    f"review '{review_id}' already resolved as '{item.status.value}'"
+            # Shared decision logic (two-person rule, distinct reviewers).
+            outcome = apply_review_decision(item, approved=approved, reviewer=reviewer)
+
+            if outcome == _OUTCOME_PARTIAL:
+                # Approval #1 of N: persist the receipt, stay pending.
+                self._conn.execute(
+                    "UPDATE reviews SET payload = ? WHERE id = ? AND status = ?",
+                    (
+                        json.dumps(item.to_dict()),
+                        review_id,
+                        ReviewStatus.PENDING.value,
+                    ),
                 )
-            item.status = ReviewStatus.APPROVED if approved else ReviewStatus.REJECTED
-            item.reviewed_by = reviewer
-            item.decided_at = datetime.now(UTC)
-            # Conditional UPDATE: the WHERE clause re-asserts "pending" inside
-            # the same statement, so two processes (separate connections)
-            # racing on the same review cannot both win — rowcount is 0 for
-            # the loser, which raises AlreadyResolvedError.
-            cursor = self._conn.execute(
-                "UPDATE reviews SET payload = ?, status = ? "
-                "WHERE id = ? AND status = ?",
-                (
-                    json.dumps(item.to_dict()),
-                    item.status.value,
-                    review_id,
-                    ReviewStatus.PENDING.value,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise AlreadyResolvedError(
-                    f"review '{review_id}' already resolved by another worker"
+                self._conn.commit()
+            else:
+                # Conditional UPDATE: the WHERE clause re-asserts "pending"
+                # inside the same statement, so two processes (separate
+                # connections) racing on the same review cannot both win —
+                # rowcount is 0 for the loser, which raises.
+                cursor = self._conn.execute(
+                    "UPDATE reviews SET payload = ?, status = ? "
+                    "WHERE id = ? AND status = ?",
+                    (
+                        json.dumps(item.to_dict()),
+                        item.status.value,
+                        review_id,
+                        ReviewStatus.PENDING.value,
+                    ),
                 )
-            self._conn.commit()
+                if cursor.rowcount != 1:
+                    raise AlreadyResolvedError(
+                        f"review '{review_id}' already resolved by another worker"
+                    )
+                self._conn.commit()
+
+        if outcome == _OUTCOME_PARTIAL:
+            receipt = build_partial_receipt(item, review_id, reviewer.strip())
+            receipt_id = self._audit_store.append(receipt)
+            return item, receipt, receipt_id
 
         origin = self._audit_store.get(item.audit_id)
         # Persist the origin update. Safe because fingerprint() excludes
@@ -390,25 +410,7 @@ class SqliteReviewStore:
         # verifies; the human verdict itself is chained in its own record.
         self._audit_store.set_human_decision(item.audit_id, item.status.value)
 
-        human_record = AuditRecord(
-            action=item.action,
-            amount=Decimal(item.amount),
-            currency=item.currency,
-            customer_id=item.customer_id,
-            agent_id=item.agent_id,
-            customer_risk=origin.record.customer_risk,
-            injection_risk=origin.record.injection_risk,
-            risk_score=origin.record.risk_score,
-            risk_band=origin.record.risk_band,
-            policy_status=origin.record.policy_status,
-            authorization="granted" if approved else "denied",
-            decision=origin.record.decision,
-            reasons=[f"human {'approved' if approved else 'rejected'} review {review_id}"],
-            policy_checks=origin.record.policy_checks,
-            risk_factors=origin.record.risk_factors,
-            review_id=review_id,
-            human_decision=item.status.value,
-        )
+        human_record = build_human_record(item, review_id, origin, approved=approved)
         human_audit_id = self._audit_store.append(human_record)
         return item, human_record, human_audit_id
 
@@ -436,6 +438,8 @@ class SqliteReviewStore:
                 if data.get("created_at")
                 else datetime.now(UTC)
             ),
+            required_approvals=int(data.get("required_approvals", 1)),
+            approvals=list(data.get("approvals", [])),
         )
 
 

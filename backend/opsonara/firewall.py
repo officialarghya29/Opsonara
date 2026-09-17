@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from opsonara.agent_authz import AgentAuthorizer
 from opsonara.blast import BlastRadius, BlastRadiusEngine
 from opsonara.core.ids import new_id
 from opsonara.core.models import (
@@ -28,7 +29,7 @@ from opsonara.core.models import (
 )
 from opsonara.engines.context import ContextEngine, RequestContext
 from opsonara.engines.decision import DecisionEngine, DecisionResult
-from opsonara.engines.policy import PolicyEngine
+from opsonara.engines.policy import PolicyEngine, PolicyStatus
 from opsonara.engines.risk import RiskEngine
 from opsonara.identity import (
     AGENT_QUARANTINED,
@@ -101,6 +102,7 @@ class FirewallEngine:
         self._risk = RiskEngine()
         self._decision = DecisionEngine()
         self._blast = BlastRadiusEngine()
+        self._agent_authz = AgentAuthorizer()
         self._audit_store = audit_store
         self._review_store = review_store
         self.policy_packs: PolicyPackStore | None = None
@@ -159,6 +161,10 @@ class FirewallEngine:
         # wrong — computed for every request, attached to the audit record.
         blast: BlastRadius = self._blast.evaluate(ctx)
 
+        # Fine-grained agent authorization (spec §2, §40): per-agent deny
+        # list, amount cap, and frequency cap — decisive, before brand policy.
+        agent_authz = self._agent_authz.authorize(request, ctx)
+
         policy_result = self._policy.evaluate(ctx)
         risk_result = self._risk.evaluate(ctx)
         decision_result: DecisionResult = self._decision.decide(
@@ -168,6 +174,19 @@ class FirewallEngine:
             policy=ctx.policy,
             injection_flagged=risk_result.injection_verdict != "clean",
         )
+
+        # Agent-level denial is decisive: it overrides any computed verdict
+        # the way a critical policy failure would.
+        if agent_authz is not None and agent_authz.blocked:
+            check = agent_authz.to_policy_check()
+            policy_result = policy_result.model_copy(
+                update={"status": PolicyStatus.DENIED, "checks": [*policy_result.checks, check]}
+            )
+            decision_result = DecisionResult(
+                decision=Decision.BLOCK,
+                authorization="denied",
+                reasons=[check.detail],
+            )
 
         reasons = self._merge_reasons(decision_result.reasons, risk_result.reasons)
 
@@ -224,6 +243,10 @@ class FirewallEngine:
 
         review_id: str | None = None
         if decision_result.decision is Decision.REVIEW and create_review:
+            # Two-person approval (spec §27): amounts above the brand's
+            # threshold require two DISTINCT humans before execution.
+            threshold = policy.two_person_approval_above
+            required = 2 if threshold is not None and ctx.amount > threshold else 1
             review_id = self._review_store.create(
                 audit_id=audit_id,
                 action=ctx.action.type.value,
@@ -234,6 +257,7 @@ class FirewallEngine:
                 reason="; ".join(reasons),
                 risk_band=risk_result.band.value,
                 risk_score=str(risk_result.total),
+                required_approvals=required,
             )
 
         return FirewallResponse(

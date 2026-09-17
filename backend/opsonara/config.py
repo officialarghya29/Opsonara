@@ -10,6 +10,11 @@ class Settings(BaseSettings):
 
     app_name: str = "Opsonara Agent Firewall"
     version: str = "0.2.0"
+    mode: str = "dev"
+    """'dev' (default) or 'production'. Production mode is *secure by default*
+    (spec §65): it force-enables API-key auth, strict credential
+    verification, restrictive CORS, disables demo seeding, and refuses to
+    boot with permissive leftovers unless explicitly overridden."""
     log_level: str = "INFO"
     seed_demo_data: bool = True
     """Seed the stores with demo transactions so the dashboard is alive on first run."""

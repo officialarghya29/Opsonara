@@ -15,7 +15,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | Agent identity | ✅ | `identity.py` | HS256 signed credentials, expiry, revocation, brand pinning |
 | Agent registry | 🟡 | `firewall.py` | agents resolved from credentials/requests; no persistent agent objects yet |
 | Credential service | ✅ | `identity.py`, `multitenant.py` | issue/rotate/revoke JWT credentials; hashed per-brand API keys |
-| Fine-grained permissions | 🟡 | `engines/policy.py` | `permission_level` 0–3 + policy checks; per-action/per-resource conditions not yet |
+| Fine-grained permissions | 🟡 | `engines/policy.py`, `agent_authz.py` | deny list + amount cap + hourly frequency cap per agent (decisive); resource/condition scoping still ahead |
 | Context engine | ✅ | `engines/context.py` | customer, order, transaction, conversation, agent context |
 | Policy engine | ✅ | `engines/policy.py`, `policy_store.py` | rules-as-data, per-brand policy packs, versioned + activatable |
 | Policy builder (natural language) | ⬜ | — | spec §10; needs GENERATE→EXPLAIN→VALIDATE→SIMULATE→APPROVE→DEPLOY flow |
@@ -40,7 +40,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 | WooCommerce connector | ✅ | `connectors.py` | REST executors |
 | Generic webhook connector | ✅ | `connectors.py` | signed outbound + verified inbound |
 | Post-execution verification (spec §24) | ✅ | `verification.py` | requested vs executed comparison, chained mismatch records, connector-integrated |
-| Idempotency / replay protection | 🟡 | `connectors.py`, `multitenant.py` | webhook signature timestamps; no per-action idempotency keys on evaluate/execute |
+| Idempotency / replay protection | ✅ | `idempotency.py`, `main.py` | `Idempotency-Key` on evaluate (replay/409/fingerprint-422) + webhook HMAC timestamps |
 | More platforms (§44) | ⬜ | — | Magento, BigCommerce, Stripe, CRM/security tools |
 
 ## 3 · Human oversight (spec §26–§32)
@@ -49,7 +49,7 @@ Status legend: ✅ shipped · 🟡 partial (foundation exists, needs depth) · �
 |---|---|---|---|
 | Human review queue | ✅ | `stores/review_store.py`, `main.py` | approve/reject, reviewer recorded, race-safe conditional updates |
 | Review → learning feedback | ✅ | `learning.py`, `main.py` | verdicts pair with decision signals → bounded recalibration |
-| Two-person approval (spec §27) | ⬜ | — | second approval for > ₹50k / bulk / data-export actions |
+| Two-person approval (spec §27) | ✅ | `stores/review_store.py`, `firewall.py` | `two_person_approval_above` policy limit → REVIEW needs two DISTINCT humans; partial receipt chained; duplicate reviewer rejected |
 | Agent kill switch (spec §28) | ✅ | `identity.py`, `main.py`, console | one call pauses every agent, exact restore on resume; dashboard button in the console |
 | Quarantine mode (spec §29) | ✅ | `identity.py`, `firewall.py` | reads continue, sensitive actions forced to human review, provenance flagged |
 | Incident management (spec §30–§31) | ⬜ | — | incident objects, timelines, auto-containment |

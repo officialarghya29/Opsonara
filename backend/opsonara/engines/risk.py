@@ -201,9 +201,15 @@ class RiskEngine:
         if ctx.customer.previous_refunds >= 2:
             score = min(score + Decimal("0.10"), Decimal("1"))
             bits.append(f"{ctx.customer.previous_refunds} prior refunds")
-        # Unusual action sequences from caller-supplied telemetry.
-        recent: dict[str, int] = ctx.metadata.get("recent_action_counts") or {}
-        refunds_24h = int(recent.get("refund", 0))
+        # Unusual action sequences from caller-supplied telemetry. The
+        # payload is caller-controlled: anything that is not a dict of
+        # counts is ignored rather than crashing the evaluate path.
+        recent_raw = ctx.metadata.get("recent_action_counts")
+        recent: dict[str, int] = recent_raw if isinstance(recent_raw, dict) else {}
+        try:
+            refunds_24h = int(recent.get("refund", 0))
+        except (TypeError, ValueError):
+            refunds_24h = 0
         if refunds_24h >= 3:
             score = min(score + Decimal("0.20"), Decimal("1"))
             bits.append(f"unusual sequence: {refunds_24h} refund actions in 24h")

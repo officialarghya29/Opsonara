@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +31,7 @@ from opsonara.connectors import (
 from opsonara.core.exceptions import AlreadyResolvedError, NotFoundError
 from opsonara.core.models import BrandPolicy
 from opsonara.firewall import AuthContext, FirewallEngine, FirewallRequest
+from opsonara.idempotency import MemoryIdempotencyStore, fingerprint_payload
 from opsonara.identity import Ap2MandateVerifier, CredentialAuthority, MandateRegistry
 from opsonara.learning import RecalibrationEngine, open_outcome_store
 from opsonara.multitenant import (
@@ -53,7 +54,9 @@ class ReviewDecisionRequest(BaseModel):
     """Body for the human decision endpoint."""
 
     approved: bool
-    reviewer: str = Field(min_length=1, max_length=120)
+    reviewer: str = Field(min_length=1, max_length=120, pattern=r"\S")
+    """Must contain a non-whitespace char — the two-person rule keys
+    distinct approvals on this name, so blank names are a client error."""
 
 
 class CreateBrandRequest(BaseModel):
@@ -104,6 +107,30 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         app_settings = settings.model_copy(update=overrides)
     else:
         app_settings = settings
+
+    if app_settings.mode == "production":
+        # Secure-by-default hardening (spec §65). Deliberate operator choices
+        # are preserved; permissive leftovers are overridden or refused.
+        if app_settings.auth_mode != "api_key":
+            raise RuntimeError(
+                "OPSONARA_MODE=production requires OPSONARA_AUTH_MODE=api_key"
+            )
+        if not app_settings.admin_token:
+            raise RuntimeError(
+                "OPSONARA_MODE=production requires an explicit OPSONARA_ADMIN_TOKEN"
+            )
+        _cors = app_settings.cors_origins.strip()
+        if _cors in ("", "*"):
+            raise RuntimeError(
+                "OPSONARA_MODE=production requires OPSONARA_CORS_ORIGINS "
+                "(comma-separated origins; '*' is not allowed)"
+            )
+        app_settings = app_settings.model_copy(
+            update={
+                "seed_demo_data": False,
+                "credential_verification": "strict",
+            }
+        )
     app = FastAPI(
         title=app_settings.app_name,
         version=app_settings.version,
@@ -171,6 +198,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
         bootstrap_admin_token=operator_token,
     )
     outcome_store = open_outcome_store()
+    idempotency_store = MemoryIdempotencyStore()
     recalibration = RecalibrationEngine(outcome_store)
     connector_service = ConnectorService(
         firewall,
@@ -208,6 +236,7 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     app.state.credential_authority = credential_authority
     app.state.mandate_registry = mandate_registry
     app.state.outcome_store = outcome_store
+    app.state.idempotency_store = idempotency_store
     app.state.connector_service = connector_service
     app.state.usage_meter = usage_meter
     app.state.billing = billing
@@ -253,13 +282,41 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
     async def evaluate(
         request: FirewallRequest,
         brand: Any = Depends(auth_dependency),  # noqa: B008 — FastAPI idiom
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         """Evaluate a proposed agent action through the full pipeline.
+
+        Send an ``Idempotency-Key`` header on consequential actions: the
+        first call's verdict is cached and replayed verbatim for retries,
+        so a network timeout can never cause a second refund. A duplicate
+        while the first is still in flight gets 409; a same-key-different-
+        body request gets 422 (client bug or tampering).
 
         Inconsistent context (e.g. action.customer_id not matching the
         order's customer) is a client error, so a raw ``ValueError`` from
         the context engine is surfaced as HTTP 422 — never a 500.
         """
+        # -- idempotency gate (spec §24) -------------------------------------
+        key = idempotency_key.strip() if idempotency_key else ""
+        fp = ""
+        if key:
+            if len(key) > 256:
+                raise HTTPException(status_code=422, detail="Idempotency-Key too long (max 256)")
+            fp = fingerprint_payload(request.model_dump(mode="json"))
+            cached = idempotency_store.get(key)
+            if cached is not None:
+                if cached["fingerprint"] != fp:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Idempotency-Key was already used with a different request body",
+                    )
+                replay = dict(cached["response"])
+                replay["idempotency_replayed"] = True
+                return replay
+            if not idempotency_store.claim(key, fp):
+                # Same key, still processing elsewhere → caller must wait.
+                raise HTTPException(status_code=409, detail="request with this Idempotency-Key is in flight")
+
         try:
             # Anonymous/dev calls (auth off → tenant "public") adopt the
             # request policy's own brand_id so learning data and audits
@@ -271,9 +328,15 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
             )
             result = firewall.evaluate(request, auth=AuthContext(brand_id=effective_brand))
         except ValueError as exc:
+            if key:
+                idempotency_store.release(key)  # allow a clean retry
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        body = result.model_dump(mode="json")
         usage_meter.record(effective_brand, "/v1/evaluate", result.decision.value)
-        return result.model_dump(mode="json")
+        if key:
+            idempotency_store.complete(key, fp, body)
+        return body
 
     # ------------------------------------------------------------------
     # audit trail
@@ -333,19 +396,28 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
             review_id, approved=body.approved, reviewer=body.reviewer.strip()
         )
         # Learning loop: pair the human verdict with the original signals so
-        # per-brand recalibration can learn from real outcomes.
-        origin = audit_store.get(item.audit_id)
-        outcome_store.record(
-            audit_id=item.audit_id,
-            brand_id=origin.record.brand_id or "default",  # legacy rows predate brand ids
-            review_id=review_id,
-            approved=body.approved,
-            risk_score=str(origin.record.risk_score),
-            signals={f.name: str(f.score) for f in origin.record.risk_factors},
-        )
+        # per-brand recalibration can learn from real outcomes. A *partial*
+        # first approval (two-person rule) is not a verdict — the outcome is
+        # only recorded once the review actually resolves.
+        resolved = item.status.value != "pending"
+        if resolved:
+            origin = audit_store.get(item.audit_id)
+            outcome_store.record(
+                audit_id=item.audit_id,
+                brand_id=origin.record.brand_id or "default",  # legacy rows predate brand ids
+                review_id=review_id,
+                approved=body.approved,
+                risk_score=str(origin.record.risk_score),
+                signals={f.name: str(f.score) for f in origin.record.risk_factors},
+            )
         return {
             "review": item.to_dict(),
             "human_audit_id": human_audit_id,
+            "awaiting_approvals": (
+                max(item.required_approvals - len(item.approvals), 0)
+                if item.status.value == "pending"
+                else 0
+            ),
         }
 
     # ------------------------------------------------------------------

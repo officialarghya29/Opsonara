@@ -55,6 +55,7 @@ class ReviewStoreProtocol(Protocol):
         reason: str,
         risk_band: str,
         risk_score: str,
+        required_approvals: int = 1,  # two-person rule (§27): 2 = two distinct humans
     ) -> str: ...
 
     def get(self, review_id: str) -> ReviewItem: ...
